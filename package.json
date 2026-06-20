@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Baymax-style microbot chain that learns to crawl via deep RL, in Three.js",
+  "description": "Robot simulator for concrete motor (servo) selection: compare snake/quadruped morphologies and size actuators via static + dynamic (Rapier) simulation",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
