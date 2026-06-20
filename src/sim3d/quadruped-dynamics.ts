@@ -328,17 +328,20 @@ function legIK(
 }
 
 /**
- * 足先目標＋IK から hip/膝の相対角目標を出す。rel=pitch(child)-pitch(parent) 規約に合わせ、
- * hip 目標 = p1 - trunkPitch（胴の傾きを相殺）、膝目標 = p2 - p1。
+ * 足先目標＋IK から hip/膝の相対角目標を出す。
+ * bodyErrX = clamp(vBody·t − 実胴前進量) を fx に足し、足を「胴追従」ではなく **世界の接地点に固定**する:
+ * 胴が基準より遅れていれば足は前方へ届かせて引き、速すぎれば後方へ引いて減速＝足が滑らず歩容速度に収束する。
+ * rel=pitch(child)-pitch(parent) 規約に合わせ、hip 目標 = p1 - trunkPitch（胴の傾きを相殺）、膝目標 = p2 - p1。
  */
 function gaitTargets(
   cfg: QuadDynConfig,
   trunkPitch: number,
+  bodyErrX: number,
   t: number,
   phase: number,
 ): { hip: number; knee: number } {
   const { fx, fz } = footTargetRelHip(cfg, t, phase);
-  const { p1, p2 } = legIK(fx, fz, cfg.leg.thigh, cfg.leg.shin, KNEE_SIGN);
+  const { p1, p2 } = legIK(fx + bodyErrX, fz, cfg.leg.thigh, cfg.leg.shin, KNEE_SIGN);
   return { hip: p1 - trunkPitch, knee: p2 - p1 };
 }
 
@@ -477,11 +480,20 @@ export async function runQuadrupedGait(
     let applied = 0;
     let saturated = false;
     // 物理サブステップごとに IK 目標と PD を再計算（torque モードの陽解法を安定化）。
+    // 歩容の基準前進速度。立脚で足が後方へ stride 掃く間に胴が stride 進む＝足が世界で固定される速度。
+    const vBody = cfg.gait.strideM / (cfg.gait.stanceDuty * cfg.gait.period);
     for (let sub = 0; sub < substeps; sub++) {
       const ts = t + sub * physicsDt;
       const trunkPitch = pitchAboutY(asm.trunk);
+      // 胴速度レギュレータ: 胴が基準より前に出すぎ(=足が滑って過走)なら足を前へずらして推力を減らし減速、
+      // 遅れていれば足を後ろへずらして推力を増やす。足が世界の接地点に収束し過走/滑りが止まる。±stride で clamp。
+      const bodyErrX = clamp(
+        asm.trunk.translation().x - startX - vBody * ts,
+        -cfg.gait.strideM,
+        cfg.gait.strideM,
+      );
       for (const leg of asm.legs) {
-        const tgt = gaitTargets(cfg, trunkPitch, ts, leg.phase);
+        const tgt = gaitTargets(cfg, trunkPitch, bodyErrX, ts, leg.phase);
         const hip = driveJoint(
           leg.hipJoint,
           asm.trunk,
