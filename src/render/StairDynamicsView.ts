@@ -1,11 +1,20 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import type { StairDynamicsFrame, StairDynamicsReplay } from '../sim3d/stair-dynamics.ts';
+import type {
+  StairDynamicsFrame,
+  StairDynamicsReplay,
+  StairFrameDiagnostics,
+} from '../sim3d/stair-dynamics.ts';
+import type { QuadBodyLayout, QuadFrame } from '../sim3d/quadruped-dynamics.ts';
 
 const LINK_COLOR = 0x16a3b8;
 const HEAD_COLOR = 0xf2a33a;
 const EDGE_COLOR = 0xe8f5f7;
 const STAIR_COLOR = 0x4c5560;
+const SUPPORT_COLOR = 0x2dd4bf;
+const SLIP_COLOR = 0xfacc15;
+const TORQUE_COLOR = 0xfb923c;
+const FALL_COLOR = 0xef4444;
 const DEFAULT_VIEW_MORPHOLOGY = {
   n: 8,
   totalLength: 0.9,
@@ -24,7 +33,21 @@ export class StairDynamicsView {
   private readonly camera: THREE.PerspectiveCamera;
   private readonly controls: OrbitControls;
   private readonly links: THREE.Group[] = [];
+  private readonly linkMaterials: THREE.MeshStandardMaterial[] = [];
+  private readonly outlineMaterials: THREE.LineBasicMaterial[] = [];
   private readonly stairs = new THREE.Group();
+  private readonly quadGroup = new THREE.Group();
+  private readonly quadMeshes: THREE.Mesh[] = [];
+  private readonly quadMaterials: THREE.MeshStandardMaterial[] = [];
+  private readonly quadJoints: Array<{
+    mesh: THREE.Mesh;
+    material: THREE.MeshStandardMaterial;
+    bodyIdx: number;
+    lz: number;
+    foot: boolean;
+  }> = [];
+  private readonly tmpVec = new THREE.Vector3();
+  private readonly tmpQuat = new THREE.Quaternion();
   private readonly followTarget = new THREE.Vector3();
   private readonly desiredCamera = new THREE.Vector3();
   private replay: StairDynamicsReplay | null = null;
@@ -47,6 +70,9 @@ export class StairDynamicsView {
     this.controls.enableDamping = true;
     this.controls.target.set(-0.16, 0.14, 0);
 
+    this.scene.add(this.quadGroup);
+    this.quadGroup.visible = false;
+
     this.buildEnvironment();
     this.buildStairs();
     this.buildLinks(DEFAULT_VIEW_MORPHOLOGY.n);
@@ -67,6 +93,112 @@ export class StairDynamicsView {
     this.controls.target.set(-0.14, 0.16, 0);
     this.camera.position.set(0.32, 0.5, 0.82);
     this.resize();
+  }
+
+  /** 蛇（階段リプレイ）と四足（動的歩行リプレイ）の表示を切り替える。 */
+  setMechanism(mechanism: 'snake' | 'quad'): void {
+    const snake = mechanism === 'snake';
+    for (const link of this.links) link.visible = snake;
+    this.stairs.visible = snake;
+    this.quadGroup.visible = !snake;
+    if (!snake) {
+      this.controls.target.set(0.05, 0.11, 0);
+      this.camera.position.set(0.18, 0.34, 0.66);
+    }
+  }
+
+  /**
+   * 四足の動的リプレイ用メッシュを layout から構築する。シミュは z-up なので
+   * quadGroup を x まわり -90° 回転して three の y-up へ変換し、子は sim 座標のまま置く。
+   */
+  buildQuadReplay(layout: QuadBodyLayout[]): void {
+    this.quadGroup.clear();
+    this.quadMeshes.length = 0;
+    this.quadMaterials.length = 0;
+    this.quadJoints.length = 0;
+    this.quadGroup.rotation.x = -Math.PI / 2;
+
+    for (const item of layout) {
+      const isTrunk = item.kind === 'trunk';
+      const material = new THREE.MeshStandardMaterial({
+        color: isTrunk ? 0xb9c6d2 : LINK_COLOR,
+        roughness: 0.45,
+        metalness: isTrunk ? 0.2 : 0.34,
+        emissive: isTrunk ? 0x10141a : 0x002a31,
+        emissiveIntensity: 0.2,
+      });
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(item.half[0] * 2, item.half[1] * 2, item.half[2] * 2),
+        material,
+      );
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      this.quadGroup.add(mesh);
+      this.quadMeshes.push(mesh);
+      this.quadMaterials.push(material);
+    }
+
+    // 関節マーカー: layout は [trunk, thigh,shin, thigh,shin, ...]。
+    // 各脚に hip（thigh上端）・膝（thigh下端）・足首（shin下端）の球を置く。
+    for (let li = 0; li * 2 + 2 < layout.length; li++) {
+      const thighIdx = 1 + li * 2;
+      const shinIdx = 2 + li * 2;
+      const thighHalfZ = layout[thighIdx].half[2];
+      const shinHalfZ = layout[shinIdx].half[2];
+      this.addQuadJoint(thighIdx, +thighHalfZ, false); // hip
+      this.addQuadJoint(thighIdx, -thighHalfZ, false); // 膝
+      this.addQuadJoint(shinIdx, -shinHalfZ, true); // 足首
+    }
+  }
+
+  /** 関節マーカー球を1つ追加（body の局所 z=lz の位置に毎フレーム置く）。 */
+  private addQuadJoint(bodyIdx: number, lz: number, foot: boolean): void {
+    const material = new THREE.MeshStandardMaterial({
+      color: foot ? 0x0c5563 : HEAD_COLOR,
+      roughness: 0.4,
+      metalness: 0.4,
+      emissive: foot ? 0x041d23 : 0x3a1e00,
+      emissiveIntensity: 0.4,
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(foot ? 0.013 : 0.016, 16, 12), material);
+    mesh.castShadow = true;
+    this.quadGroup.add(mesh);
+    this.quadJoints.push({ mesh, material, bodyIdx, lz, foot });
+  }
+
+  /** 1フレームの剛体姿勢（sim座標 p,q）を適用。転倒中は赤、通常は teal。 */
+  applyQuadFrame(frame: QuadFrame): void {
+    for (let i = 0; i < this.quadMeshes.length; i++) {
+      const b = frame.bodies[i];
+      if (!b) continue;
+      this.quadMeshes[i].position.set(b.p[0], b.p[1], b.p[2]);
+      this.quadMeshes[i].quaternion.set(b.q[0], b.q[1], b.q[2], b.q[3]);
+    }
+    for (let i = 0; i < this.quadMaterials.length; i++) {
+      const base = i === 0 ? 0xb9c6d2 : LINK_COLOR;
+      this.quadMaterials[i].color.setHex(frame.diag.fallen ? FALL_COLOR : base);
+    }
+    // 関節マーカー: 対応する剛体の局所 z=lz をワールドへ変換して配置
+    for (const joint of this.quadJoints) {
+      const b = frame.bodies[joint.bodyIdx];
+      if (!b) continue;
+      this.tmpQuat.set(b.q[0], b.q[1], b.q[2], b.q[3]);
+      this.tmpVec.set(0, 0, joint.lz).applyQuaternion(this.tmpQuat);
+      joint.mesh.position.set(
+        b.p[0] + this.tmpVec.x,
+        b.p[1] + this.tmpVec.y,
+        b.p[2] + this.tmpVec.z,
+      );
+      joint.material.color.setHex(
+        frame.diag.fallen ? FALL_COLOR : joint.foot ? 0x0c5563 : HEAD_COLOR,
+      );
+    }
+    // trunk の sim x を滑らかに追従（group の x 回転では three x と一致）
+    const tx = frame.bodies[0]?.p[0] ?? 0;
+    this.followTarget.set(tx, 0.1, 0);
+    this.desiredCamera.set(tx + 0.06, 0.34, 0.78);
+    this.controls.target.lerp(this.followTarget, 0.1);
+    this.camera.position.lerp(this.desiredCamera, 0.1);
   }
 
   duration(): number {
@@ -132,6 +264,7 @@ export class StairDynamicsView {
   private buildStairs(replay?: StairDynamicsReplay): void {
     this.stairs.clear();
     const stair = replay?.summary.config.stair ?? DEFAULT_VIEW_STAIR;
+    const morphology = replay?.summary.config.morphology ?? DEFAULT_VIEW_MORPHOLOGY;
 
     this.addStairBlock(-0.7, -0.02, 1.4, 0.04);
     for (let i = 0; i < stair.stepCount; i++) {
@@ -139,6 +272,15 @@ export class StairDynamicsView {
       const x = i * stair.treadDepth + stair.treadDepth / 2;
       this.addStairBlock(x, height / 2, stair.treadDepth, height);
     }
+
+    const landingHeight = stair.stepCount * stair.rise;
+    const landingDepth = morphology.totalLength + 0.45;
+    this.addStairBlock(
+      stair.stepCount * stair.treadDepth + landingDepth / 2,
+      landingHeight / 2,
+      landingDepth,
+      landingHeight,
+    );
   }
 
   private addStairBlock(x: number, y: number, width: number, height: number): void {
@@ -167,6 +309,8 @@ export class StairDynamicsView {
       this.scene.remove(link);
     }
     this.links.length = 0;
+    this.linkMaterials.length = 0;
+    this.outlineMaterials.length = 0;
 
     const m = this.replay?.summary.config.morphology ?? DEFAULT_VIEW_MORPHOLOGY;
     const linkLen = m.totalLength / m.n;
@@ -176,32 +320,30 @@ export class StairDynamicsView {
     for (let i = 0; i < count; i++) {
       const group = new THREE.Group();
       const isHead = i === count - 1;
-      const mesh = new THREE.Mesh(
-        body,
-        new THREE.MeshStandardMaterial({
-          color: isHead ? HEAD_COLOR : LINK_COLOR,
-          roughness: 0.44,
-          metalness: 0.32,
-          emissive: isHead ? 0x3a1e00 : 0x002a31,
-          emissiveIntensity: isHead ? 0.4 : 0.2,
-        }),
-      );
+      const material = new THREE.MeshStandardMaterial({
+        color: isHead ? HEAD_COLOR : LINK_COLOR,
+        roughness: 0.44,
+        metalness: 0.32,
+        emissive: isHead ? 0x3a1e00 : 0x002a31,
+        emissiveIntensity: isHead ? 0.4 : 0.2,
+      });
+      const mesh = new THREE.Mesh(body, material);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       group.add(mesh);
 
-      const outline = new THREE.LineSegments(
-        edge,
-        new THREE.LineBasicMaterial({
-          color: EDGE_COLOR,
-          transparent: true,
-          opacity: isHead ? 0.9 : 0.55,
-        }),
-      );
+      const outlineMaterial = new THREE.LineBasicMaterial({
+        color: EDGE_COLOR,
+        transparent: true,
+        opacity: isHead ? 0.9 : 0.55,
+      });
+      const outline = new THREE.LineSegments(edge, outlineMaterial);
       group.add(outline);
 
       this.scene.add(group);
       this.links.push(group);
+      this.linkMaterials.push(material);
+      this.outlineMaterials.push(outlineMaterial);
     }
   }
 
@@ -213,6 +355,7 @@ export class StairDynamicsView {
       this.links[i].position.set(link.x, link.z, 0);
       this.links[i].rotation.set(0, 0, link.angle);
     }
+    this.applyDiagnostics(frame.diagnostics);
   }
 
   private applyInterpolatedFrame(a: StairDynamicsFrame, b: StairDynamicsFrame, u: number): void {
@@ -242,6 +385,47 @@ export class StairDynamicsView {
       this.desiredCamera.set(cx + 0.42, cy + 0.36, 0.88);
       this.controls.target.lerp(this.followTarget, 0.12);
       this.camera.position.lerp(this.desiredCamera, 0.12);
+    }
+
+    this.applyDiagnostics(u < 0.5 ? a.diagnostics : b.diagnostics);
+  }
+
+  private applyDiagnostics(diagnostics?: StairFrameDiagnostics): void {
+    const supported = new Set(diagnostics?.supportedLinks ?? []);
+    const slipping = new Set(diagnostics?.slippingLinks ?? []);
+    const falling = new Set(diagnostics?.fallingLinks ?? []);
+    const torqueFailed = diagnostics ? diagnostics.torqueRatio > 1 : false;
+    const slipFailed = diagnostics?.failureKinds.includes('slip') ?? false;
+
+    for (let i = 0; i < this.linkMaterials.length; i++) {
+      const isHead = i === this.linkMaterials.length - 1;
+      let color = isHead ? HEAD_COLOR : LINK_COLOR;
+      let emissive = isHead ? 0x3a1e00 : 0x002a31;
+      let emissiveIntensity = isHead ? 0.4 : 0.2;
+
+      if (falling.has(i)) {
+        color = FALL_COLOR;
+        emissive = 0x4c0505;
+        emissiveIntensity = 0.75;
+      } else if (torqueFailed && diagnostics && i > diagnostics.torqueJoint) {
+        color = TORQUE_COLOR;
+        emissive = 0x4a1c00;
+        emissiveIntensity = 0.7;
+      } else if (slipping.has(i) || (slipFailed && supported.has(i))) {
+        color = SLIP_COLOR;
+        emissive = 0x403500;
+        emissiveIntensity = 0.55;
+      } else if (supported.has(i)) {
+        color = SUPPORT_COLOR;
+        emissive = 0x003c36;
+        emissiveIntensity = 0.38;
+      }
+
+      this.linkMaterials[i].color.setHex(color);
+      this.linkMaterials[i].emissive.setHex(emissive);
+      this.linkMaterials[i].emissiveIntensity = emissiveIntensity;
+      this.outlineMaterials[i].color.setHex(falling.has(i) ? 0xffffff : EDGE_COLOR);
+      this.outlineMaterials[i].opacity = falling.has(i) ? 0.95 : isHead ? 0.9 : 0.55;
     }
   }
 

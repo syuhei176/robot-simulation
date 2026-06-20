@@ -10,6 +10,9 @@
         --panel: rgba(12, 18, 28, 0.84);
         --text: #d8e6f2;
         --muted: #7890a8;
+        --good: #4ade80;
+        --warn: #facc15;
+        --bad: #ef4444;
       }
       * {
         box-sizing: border-box;
@@ -31,7 +34,7 @@
         position: fixed;
         top: 16px;
         left: 16px;
-        width: 300px;
+        width: 340px;
         padding: 16px 18px;
         background: var(--panel);
         border: 1px solid rgba(53, 200, 255, 0.25);
@@ -70,6 +73,16 @@
         color: #04121b;
         font-weight: 600;
       }
+      select {
+        flex: 1;
+        padding: 7px 8px;
+        background: rgba(53, 200, 255, 0.1);
+        color: var(--text);
+        border: 1px solid rgba(53, 200, 255, 0.4);
+        border-radius: 8px;
+        font-size: 12px;
+        cursor: pointer;
+      }
       label {
         margin: 9px 0 3px;
         font-size: 11px;
@@ -98,32 +111,87 @@
         color: var(--accent);
         font-weight: 600;
       }
+      .stats b.good {
+        color: var(--good);
+      }
+      .stats b.warn {
+        color: var(--warn);
+      }
+      .stats b.bad {
+        color: var(--bad);
+      }
     </style>
   </head>
   <body>
     <div id="app"></div>
     <div id="panel">
-      <h1>SNAKE · STAIR</h1>
-      <div class="sub">Rapier dynamic replay</div>
+      <h1 id="title">SNAKE · STAIR</h1>
+      <div class="sub" id="subtitle">Rapier physical attempt + diagnostics</div>
       <div class="row">
-        <button id="btn-play" class="active">⏸ 一時停止</button>
-        <button id="btn-reset">先頭へ</button>
+        <select id="sel-mech">
+          <option value="snake">機構: 蛇</option>
+          <option value="quad">機構: 四足</option>
+        </select>
+        <!-- options are populated from SELECTABLE_SERVO_IDS in stair-viewer.ts -->
+        <select id="sel-motor"></select>
       </div>
-      <label>再生位置 <span id="v-time">0.00s</span></label>
-      <input id="s-time" type="range" min="0" max="4" step="0.01" value="0" />
-      <label>再生速度 <span id="v-speed">1.00x</span></label>
-      <input id="s-speed" type="range" min="0.25" max="2" step="0.05" value="1" />
-      <div class="stats">
+      <div id="snake-controls">
+        <div class="row">
+          <button id="btn-play" class="active">⏸ 一時停止</button>
+          <button id="btn-reset">先頭へ</button>
+        </div>
+        <label>再生位置 <span id="v-time">0.00s</span></label>
+        <input id="s-time" type="range" min="0" max="4" step="0.01" value="0" />
+        <label>再生速度 <span id="v-speed">1.00x</span></label>
+        <input id="s-speed" type="range" min="0.25" max="2" step="0.05" value="1" />
+      </div>
+      <label>モーター τ上限 <span id="v-torque-cap">2.94 N·m</span></label>
+      <input id="s-torque-cap" type="range" min="0.05" max="3.5" step="0.05" value="2.94" />
+      <div id="snake-friction">
+        <label>診断 摩擦 μ <span id="v-friction">0.60</span></label>
+        <input id="s-friction" type="range" min="0.15" max="1.4" step="0.05" value="0.6" />
+      </div>
+      <div id="quad-mass" style="display: none">
+        <label>総質量 <span id="v-mass">1.20 kg</span></label>
+        <input id="s-mass" type="range" min="1.2" max="2.5" step="0.05" value="1.2" />
+      </div>
+      <div class="stats" id="snake-stats">
         <div>状態</div>
         <div><b id="st-status">生成中</b></div>
-        <div>動的ピーク</div>
+        <div>現在 τ/cap</div>
+        <div><b id="st-tau-now">—</b></div>
+        <div>ピーク τ/cap</div>
         <div><b id="st-tau">—</b></div>
-        <div>静的比</div>
-        <div><b id="st-ratio">—</b></div>
-        <div>μ要求</div>
+        <div>現在 μ/設定</div>
+        <div><b id="st-mu-now">—</b></div>
+        <div>ピーク μ要求</div>
         <div><b id="st-mu">—</b></div>
-        <div>head tip</div>
+        <div>滑り速度</div>
+        <div><b id="st-slip">—</b></div>
+        <div>最小 clearance</div>
+        <div><b id="st-clearance">—</b></div>
+        <div>支持リンク</div>
+        <div><b id="st-supports">—</b></div>
+        <div>初回破綻</div>
+        <div><b id="st-first-failure">—</b></div>
+        <div>final head</div>
         <div><b id="st-head">—</b></div>
+      </div>
+      <div class="stats" id="quad-stats" style="display: none">
+        <div>機構</div>
+        <div><b>四足（3D動的歩行）</b></div>
+        <div>モーター</div>
+        <div><b id="q-motor">—</b></div>
+        <div>前進距離</div>
+        <div><b id="q-forward">—</b></div>
+        <div>転倒</div>
+        <div><b id="q-fall">—</b></div>
+        <div>モーター τ上限</div>
+        <div><b id="q-cap">—</b></div>
+        <div>駆動関節数</div>
+        <div><b id="q-joints">8</b></div>
+        <div>判定</div>
+        <div><b id="q-result">—</b></div>
       </div>
     </div>
     <script type="module" src="/src/stair-viewer.ts"></script>

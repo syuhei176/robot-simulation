@@ -38,6 +38,10 @@ export interface StairDynamicsConfig {
   motor: JointMotorConfig;
   clearance: number;
   tractionProbeForceN: number;
+  /** 歩容の時間スケール（1=基準, 2=2倍ゆっくり）。加速∝1/scale²で動的トルクを下げる。 */
+  gaitTimeScale?: number;
+  /** 開始 warmup 区間 [s]。生成直後の整定トランジェントを要求トルク統計から除外する。 */
+  demandWarmupS?: number;
 }
 
 export interface StairDynamicsSummary {
@@ -45,6 +49,7 @@ export interface StairDynamicsSummary {
   liftLinks: number;
   staticArcPeakNm: number;
   maxDemandTorqueNm: number;
+  maxDemandTimeS: number;
   maxAppliedTorqueNm: number;
   maxDemandJoint: number;
   maxAppliedJoint: number;
@@ -57,6 +62,7 @@ export interface StairDynamicsSummary {
   finalHeadTip: [number, number];
   maxHeadTipZ: number;
   success: boolean;
+  feasibility?: StairFeasibilitySummary;
 }
 
 export interface StairDynamicsLinkFrame {
@@ -69,11 +75,65 @@ export interface StairDynamicsFrame {
   t: number;
   links: StairDynamicsLinkFrame[];
   headTip: [number, number];
+  telemetry?: StairFrameTelemetry;
+  diagnostics?: StairFrameDiagnostics;
 }
 
 export interface StairDynamicsReplay {
   summary: StairDynamicsSummary;
   frames: StairDynamicsFrame[];
+}
+
+export type StairFailureKind = 'torque' | 'fall' | 'slip' | 'mu';
+
+export interface StairFrameDiagnostics {
+  torqueNm: number;
+  torqueLimitNm: number;
+  torqueRatio: number;
+  torqueJoint: number;
+  motorDemandNm?: number;
+  motorAppliedNm?: number;
+  motorTorqueRatio?: number;
+  motorJoint?: number;
+  motorSaturated?: boolean;
+  driveForceN?: number;
+  requiredMu: number;
+  friction: number;
+  slipSpeedMps: number;
+  minClearanceM: number;
+  maxUnsupportedSpanM: number;
+  supportCount: number;
+  com: [number, number];
+  supportedLinks: number[];
+  slippingLinks: number[];
+  fallingLinks: number[];
+  failureKinds: StairFailureKind[];
+}
+
+export interface StairFrameTelemetry {
+  motorDemandNm: number;
+  motorAppliedNm: number;
+  motorTorqueRatio: number;
+  motorJoint: number;
+  motorSaturated: boolean;
+  driveForceN: number;
+}
+
+export interface StairFeasibilitySummary {
+  passed: boolean;
+  firstFailureTime: number | null;
+  failureCounts: Record<StairFailureKind, number>;
+  maxTorqueNm: number;
+  maxTorqueRatio: number;
+  maxRequiredMu: number;
+  maxSlipSpeedMps: number;
+  minClearanceM: number;
+  maxUnsupportedSpanM: number;
+  minSupportCount: number;
+  worstTorqueTime: number;
+  worstMuTime: number;
+  worstSlipTime: number;
+  worstClearanceTime: number;
 }
 
 interface ChainBody {
@@ -116,7 +176,15 @@ export const DEFAULT_STAIR_DYNAMICS_CONFIG: StairDynamicsConfig = {
   },
   clearance: 0.06,
   tractionProbeForceN: 3,
+  gaitTimeScale: 1,
 };
+
+// 基準歩容で「持ち上げ→縁越え→配置」が完了する時刻 [s]（gaitTimeScale=1 のとき）
+const GAIT_BASE_MOTION_END_S = 2.8;
+
+function gaitMotionEnd(config: StairDynamicsConfig): number {
+  return GAIT_BASE_MOTION_END_S * (config.gaitTimeScale ?? 1);
+}
 
 function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
@@ -197,10 +265,11 @@ function buildTargets(config: StairDynamicsConfig, liftLinks: number): TargetKey
   };
 }
 
-function targetAt(t: number, targets: TargetKeyframes): number[] {
-  if (t < 0.4) return targets.prepare;
-  if (t < 1.8) return mixAngles(targets.prepare, targets.overEdge, smoothstep((t - 0.4) / 1.4));
-  if (t < 2.8) return mixAngles(targets.overEdge, targets.place, smoothstep((t - 1.8) / 1.0));
+function targetAt(t: number, targets: TargetKeyframes, gaitTimeScale = 1): number[] {
+  const u = t / gaitTimeScale; // 基準タイムラインへ正規化（ゆっくり化すると加速が下がる）
+  if (u < 0.4) return targets.prepare;
+  if (u < 1.8) return mixAngles(targets.prepare, targets.overEdge, smoothstep((u - 0.4) / 1.4));
+  if (u < 2.8) return mixAngles(targets.overEdge, targets.place, smoothstep((u - 1.8) / 1.0));
   return targets.place;
 }
 
@@ -358,7 +427,7 @@ function configureJointMotors(
 }
 
 function applyTractionProbe(assembly: ChainAssembly, t: number, config: StairDynamicsConfig): void {
-  if (t < 2.8 || config.tractionProbeForceN <= 0) return;
+  if (t < gaitMotionEnd(config) || config.tractionProbeForceN <= 0) return;
 
   // Small forward body load after the head is placed on the tread. This is not a gait;
   // it is a repeatable probe to make contact friction show up in the log.
@@ -479,6 +548,7 @@ async function simulateStairDynamics(
       recordFps > 0 ? Math.max(1, Math.round(1 / (recordFps * config.dt))) : Infinity;
 
     let maxDemandTorqueNm = 0;
+    let maxDemandTimeS = 0;
     let maxAppliedTorqueNm = 0;
     let maxDemandJoint = 0;
     let maxAppliedJoint = 0;
@@ -495,13 +565,18 @@ async function simulateStairDynamics(
       if (step % recordEverySteps === 0) {
         frames.push(captureFrame(assembly.links, linkLen, t));
       }
-      const torques = configureJointMotors(assembly, targetAt(t, targets), config.motor);
+      const torques = configureJointMotors(
+        assembly,
+        targetAt(t, targets, config.gaitTimeScale ?? 1),
+        config.motor,
+      );
       applyTractionProbe(assembly, t, config);
       world.step();
 
-      if (torques.maxDemand > maxDemandTorqueNm) {
+      if (t >= (config.demandWarmupS ?? 0) && torques.maxDemand > maxDemandTorqueNm) {
         maxDemandTorqueNm = torques.maxDemand;
         maxDemandJoint = torques.demandJoint;
+        maxDemandTimeS = t;
       }
       if (torques.maxApplied > maxAppliedTorqueNm) {
         maxAppliedTorqueNm = torques.maxApplied;
@@ -511,7 +586,9 @@ async function simulateStairDynamics(
 
       const contacts = readContacts(world, assembly.links, env, config.dt, config.friction);
       const probeMuDemand =
-        t >= 2.8 && config.tractionProbeForceN > 0 && contacts.totalNormalForce > 1e-9
+        t >= gaitMotionEnd(config) &&
+        config.tractionProbeForceN > 0 &&
+        contacts.totalNormalForce > 1e-9
           ? config.tractionProbeForceN / contacts.totalNormalForce
           : 0;
       maxContactNormalForceN = Math.max(maxContactNormalForceN, contacts.maxNormalForce);
@@ -536,6 +613,7 @@ async function simulateStairDynamics(
         liftLinks,
         staticArcPeakNm: staticArcPeak(config, liftLinks),
         maxDemandTorqueNm,
+        maxDemandTimeS,
         maxAppliedTorqueNm,
         maxDemandJoint,
         maxAppliedJoint,

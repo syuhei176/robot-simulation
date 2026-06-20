@@ -202,6 +202,7 @@ export function createKinematicStairReplay(
     liftLinks,
     staticArcPeakNm: staticArcPeak(config, liftLinks),
     maxDemandTorqueNm: 0.501,
+    maxDemandTimeS: 0,
     maxAppliedTorqueNm: 0.501,
     maxDemandJoint: 5,
     maxAppliedJoint: 5,

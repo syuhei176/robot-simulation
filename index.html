@@ -12,6 +12,8 @@
         --text: #d8e6f2;
         --muted: #6f86a0;
         --good: #4ade80;
+        --warn: #facc15;
+        --bad: #ef4444;
       }
       * {
         box-sizing: border-box;
@@ -124,6 +126,15 @@
         color: var(--accent);
         font-weight: 600;
       }
+      .stats b.good {
+        color: var(--good);
+      }
+      .stats b.warn {
+        color: var(--warn);
+      }
+      .stats b.bad {
+        color: var(--bad);
+      }
       .note {
         margin-top: 10px;
         font-size: 10.5px;
@@ -198,16 +209,30 @@
         <input id="s-stair-time" type="range" min="0" max="4" step="0.01" value="0" />
         <label>再生速度 <span id="v-stair-speed">1.00x</span></label>
         <input id="s-stair-speed" type="range" min="0.25" max="2" step="0.05" value="1" />
+        <label>診断 τ上限 <span id="v-stair-torque-cap">0.25 N·m</span></label>
+        <input id="s-stair-torque-cap" type="range" min="0.05" max="2.5" step="0.05" value="0.25" />
+        <label>診断 摩擦 μ <span id="v-stair-friction">0.60</span></label>
+        <input id="s-stair-friction" type="range" min="0.15" max="1.4" step="0.05" value="0.6" />
         <div class="stats">
           <div>状態</div>
           <div><b id="st-stair-status">準備中</b></div>
-          <div>動的ピーク</div>
+          <div>現在 τ/cap</div>
+          <div><b id="st-stair-tau-now">—</b></div>
+          <div>ピーク τ/cap</div>
           <div><b id="st-stair-tau">—</b></div>
-          <div>静的比</div>
-          <div><b id="st-stair-ratio">—</b></div>
-          <div>μ要求</div>
+          <div>現在 μ/設定</div>
+          <div><b id="st-stair-mu-now">—</b></div>
+          <div>ピーク μ要求</div>
           <div><b id="st-stair-mu">—</b></div>
-          <div>head tip</div>
+          <div>滑り速度</div>
+          <div><b id="st-stair-slip">—</b></div>
+          <div>最小 clearance</div>
+          <div><b id="st-stair-clearance">—</b></div>
+          <div>支持リンク</div>
+          <div><b id="st-stair-supports">—</b></div>
+          <div>初回破綻</div>
+          <div><b id="st-stair-first-failure">—</b></div>
+          <div>final head</div>
           <div><b id="st-stair-head">—</b></div>
         </div>
       </div>

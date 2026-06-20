@@ -11,33 +11,13 @@
  *   実行: pnpm motor-sizing   (Node 型ストリップ)
  */
 import { G, reachArc, staticTorques, horizontalCantilever } from '../src/sim3d/chain.ts';
+import { getServo, pickServo, SELECTABLE_SERVO_IDS } from '../src/sim3d/servos.ts';
+import { analyzeQuad, defaultPostures, defaultQuad } from '../src/sim3d/quadruped-static.ts';
 
 const NM_PER_KGCM = 0.0980665; // 1 kg·cm = 0.0980665 N·m
 const toKgcm = (nm: number) => nm / NM_PER_KGCM;
 
-interface Servo {
-  name: string;
-  stallNm: number;
-  massG: number;
-  priceJpy: number;
-}
-
-// 代表的サーボのストールトルク（おおよそ・定格電圧）
-const SERVOS: Servo[] = [
-  { name: 'Dynamixel XL330-M288', stallNm: 0.4, massG: 18, priceJpy: 3500 },
-  { name: 'MG996R (6V)', stallNm: 1.0, massG: 55, priceJpy: 600 },
-  { name: 'Dynamixel XL430-W250', stallNm: 1.5, massG: 57, priceJpy: 7000 },
-  { name: 'Feetech STS3215 (12V)', stallNm: 2.94, massG: 60, priceJpy: 2500 },
-  { name: 'Dynamixel XM430-W350', stallNm: 3.5, massG: 82, priceJpy: 25000 },
-];
-
 const DESIGN_SAFETY = 1.5; // 最悪姿勢（腕水平）を設計荷重とした上での安全率
-
-function pickServo(requiredNm: number): Servo | null {
-  return (
-    SERVOS.filter((s) => s.stallNm >= requiredNm).sort((a, b) => a.stallNm - b.stallNm)[0] ?? null
-  );
-}
 
 interface Morphology {
   n: number; // リンク数
@@ -185,7 +165,93 @@ for (const mass of massesKg) {
   }
 }
 
+// ---- SG90 成立サイズ探索 ------------------------------------------------
+const SG90 = getServo('sg90');
+
+function sg90Row(label: string, m: Morphology, step: Step): void {
+  const a = analyze(m, step);
+  const design = a.cantPeak * DESIGN_SAFETY;
+  const fits = design <= SG90.stallNm;
+  const usagePct = (a.arcPeak / SG90.stallNm) * 100; // 効率歩容での常用負荷（ストール比）
+  const verdict = fits
+    ? `OK 常用${fmt(usagePct, 0)}%`
+    : `NG (設計荷重${fmt(design / SG90.stallNm, 1)}xストール)`;
+  const reach = a.reachable ? '' : ' [届かず]';
+  console.log(
+    `  ${label.padEnd(13)} | ${a.liftLinks}本/${String(Math.round(a.liftMass * 1000)).padStart(3)}g | π=${fmt(toKgcm(a.arcPeak), 2).padStart(5)} 最悪=${fmt(toKgcm(a.cantPeak), 2).padStart(5)}kg·cm | 設計=${fmt(toKgcm(design), 2).padStart(5)}kg·cm | ${verdict}${reach}`,
+  );
+}
+
+console.log('');
+console.log('=== SG90 成立サイズ探索（A: 実階段18cm固定で軽量化） ===');
+console.log(`SG90 ストール=${tq(SG90.stallNm)} / 設計荷重がこれ以下なら OK`);
+for (const mass of [1.0, 0.4, 0.25, 0.19, 0.15]) {
+  sg90Row(`90cm ${fmt(mass, 2)}kg`, { n: 8, totalLength: 0.9, totalMass: mass }, STEP);
+}
+console.log(
+  '  → 実階段(蹴上18cm)を残すと弦20.6cmが固定。90cm級では総質量≈0.19kg以下でないとSG90に乗らない。',
+);
+
+console.log('');
+console.log('=== SG90 成立サイズ探索（B: 幾何相似ダウンスケール＝トイ階段, 質量∝s³・段も×s） ===');
+console.log('  トルク∝s⁴で激減。ただし登るのは縮小した段（実18cm階段ではない）。');
+const REF_LEN = 0.9;
+const REF_MASS = 1.0;
+for (const sc of [1.0, 0.8, 0.7, 0.66, 0.6, 0.5]) {
+  const len = REF_LEN * sc;
+  const mass = REF_MASS * sc ** 3;
+  const step: Step = { rise: STEP.rise * sc, forward: STEP.forward * sc };
+  sg90Row(
+    `s=${fmt(sc, 2)} ${fmt(len * 100, 0)}cm`,
+    { n: 8, totalLength: len, totalMass: mass },
+    step,
+  );
+}
+
+// ---- 機構×モーター比較（蛇 vs 四足, 静的設計荷重） --------------------------
+const SELECTABLE = SELECTABLE_SERVO_IDS.map(getServo);
+
+/** 設計荷重(最悪τ×1.5) に対し、4モーターが足りるか（✓/✗）を1行に。 */
+function motorCells(worstNm: number): string {
+  const design = worstNm * DESIGN_SAFETY;
+  return SELECTABLE.map((sv) => (sv.stallNm >= design ? '  ✓  ' : '  ✗  ')).join('|');
+}
+
+function mechRow(mech: string, posture: string, worstNm: number, joints: number): void {
+  console.log(
+    `  ${mech.padEnd(4)} ${posture.padEnd(20)} | ${fmt(toKgcm(worstNm), 2).padStart(5)} | ${fmt(toKgcm(worstNm * DESIGN_SAFETY), 2).padStart(5)} |${motorCells(worstNm)}| ${String(joints).padStart(2)}`,
+  );
+}
+
+console.log('');
+console.log('=== 機構×モーター比較（静的: 設計荷重 = 最悪姿勢τ × 1.5, 1関節あたり） ===');
+console.log(`総質量${BASE.totalMass}kg / 段 蹴上${STEP.rise * 100}cm・前方${STEP.forward * 100}cm`);
+console.log(
+  `  選択4モーター: ${SELECTABLE.map((s) => `${s.id.toUpperCase()}(${fmt(toKgcm(s.stallNm), 1)})`).join(' / ')} kg·cm`,
+);
+console.log(
+  `  機構 姿勢                 | 最悪τ | 設計荷重|${SELECTABLE.map((s) => s.id.padStart(5).padEnd(5)).join('|')}| 関節`,
+);
+
+// 蛇: 基準形状の最悪（水平片持ち）。関節数 = リンク数-1。
+mechRow('蛇', `階段保持(片持ち${s.liftLinks}links)`, s.cantPeak, BASE.n - 1);
+
+// 四足: 同じ総質量・6モジュール級（4脚×1関節＋胴2）。3姿勢を評価。
+const quad = analyzeQuad(defaultQuad(BASE.totalMass), defaultPostures(STEP.rise));
+for (const leg of quad.legs) {
+  mechRow('四足', `${leg.posture}`, leg.peakNm, quad.jointCount);
+}
+console.log(
+  `  注: 四足は1脚1関節(6モジュール=4脚+胴2)・矢状面1脚モデル。支持体重=総質量÷支持脚数。`,
+);
+console.log(
+  `  注: 蛇は持ち上げ部を片持ちで支えるため1関節が重い。四足は体重を脚で床へ預けるので立脚は軽いが、段差リーチで増える。`,
+);
+
 console.log('');
 console.log(
   '注: これは静的保持トルクの一次見積り。動的ピーク（縁越えの瞬間加速）と接触は次段の Rapier で上乗せ評価する。',
+);
+console.log(
+  '注: SG90はプラギア・FBなし・保持に常時電流。動的ピークは静的の約3倍（§6）なので、上の常用%に十分な余裕が要る。',
 );

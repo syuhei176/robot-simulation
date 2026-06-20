@@ -7,8 +7,10 @@ import { StairDynamicsView } from './render/StairDynamicsView.ts';
 import { MicrobotEnv } from './env/MicrobotEnv.ts';
 import { Policy } from './rl/Policy.ts';
 import { PPO } from './rl/PPO.ts';
-import { createKinematicStairReplay } from './sim3d/stair-kinematic-replay.ts';
-import type { StairDynamicsReplay } from './sim3d/stair-dynamics.ts';
+import { DEFAULT_STAIR_REPLAY_CONFIG } from './sim3d/stair-kinematic-replay.ts';
+import { sampleStairDiagnostics } from './sim3d/stair-feasibility.ts';
+import { runPhysicalStairAttemptReplay } from './sim3d/stair-physical-attempt.ts';
+import type { StairDynamicsReplay, StairFailureKind } from './sim3d/stair-dynamics.ts';
 
 const SAVE_KEY = 'microbot-ppo';
 
@@ -36,10 +38,12 @@ let mode: Mode = 'rl';
 let training = false;
 const rewardHistory: number[] = [];
 let stairReplay: StairDynamicsReplay | null = null;
-let stairReplayLoading = false;
 let stairPlaying = true;
 let stairTime = 0;
 let stairSpeed = 1;
+let stairTorqueCapNm = 0.25;
+let stairFriction = 0.6;
+let stairLoadSeq = 0;
 
 // メインループの時間積分用（wall-clock 同期）
 let lastTimestamp: number | null = null;
@@ -146,13 +150,53 @@ const btnStairPlay = el<HTMLButtonElement>('btn-stair-play');
 const btnStairReset = el<HTMLButtonElement>('btn-stair-reset');
 const stairProgress = el<HTMLInputElement>('s-stair-time');
 const stairSpeedInput = el<HTMLInputElement>('s-stair-speed');
+const stairTorqueCapInput = el<HTMLInputElement>('s-stair-torque-cap');
+const stairFrictionInput = el<HTMLInputElement>('s-stair-friction');
 const stairTimeValue = el<HTMLSpanElement>('v-stair-time');
 const stairSpeedValue = el<HTMLSpanElement>('v-stair-speed');
+const stairTorqueCapValue = el<HTMLSpanElement>('v-stair-torque-cap');
+const stairFrictionValue = el<HTMLSpanElement>('v-stair-friction');
 const stStairStatus = el<HTMLElement>('st-stair-status');
+const stStairTauNow = el<HTMLElement>('st-stair-tau-now');
 const stStairTau = el<HTMLElement>('st-stair-tau');
-const stStairRatio = el<HTMLElement>('st-stair-ratio');
+const stStairMuNow = el<HTMLElement>('st-stair-mu-now');
 const stStairMu = el<HTMLElement>('st-stair-mu');
+const stStairSlip = el<HTMLElement>('st-stair-slip');
+const stStairClearance = el<HTMLElement>('st-stair-clearance');
+const stStairSupports = el<HTMLElement>('st-stair-supports');
+const stStairFirstFailure = el<HTMLElement>('st-stair-first-failure');
 const stStairHead = el<HTMLElement>('st-stair-head');
+
+function fmtFinite(value: number, digits = 2): string {
+  if (!Number.isFinite(value)) return '∞';
+  return value.toFixed(digits);
+}
+
+function setMetricClass(node: HTMLElement, kind: 'good' | 'warn' | 'bad' | null): void {
+  node.classList.remove('good', 'warn', 'bad');
+  if (kind) node.classList.add(kind);
+}
+
+function failureLabel(kind: StairFailureKind): string {
+  if (kind === 'torque') return 'トルク';
+  if (kind === 'fall') return '落下/干渉';
+  if (kind === 'slip') return '滑り';
+  return '高μ';
+}
+
+function formatFailureKinds(kinds: StairFailureKind[]): string {
+  return kinds.length > 0 ? kinds.map(failureLabel).join(' / ') : 'pass';
+}
+
+function stairOverrides(): Partial<StairDynamicsReplay['summary']['config']> {
+  return {
+    friction: stairFriction,
+    motor: {
+      ...DEFAULT_STAIR_REPLAY_CONFIG.motor,
+      maxTorqueNm: stairTorqueCapNm,
+    },
+  };
+}
 
 function setStairPlaying(playing: boolean): void {
   stairPlaying = playing;
@@ -167,28 +211,86 @@ function updateStairControls(): void {
   stairProgress.value = clamped.toFixed(2);
   stairTimeValue.textContent = `${clamped.toFixed(2)}s`;
   stairSpeedValue.textContent = `${stairSpeed.toFixed(2)}x`;
+  stairTorqueCapValue.textContent = `${stairTorqueCapNm.toFixed(2)} N·m`;
+  stairFrictionValue.textContent = stairFriction.toFixed(2);
+  updateStairDiagnostics();
+}
+
+function updateStairDiagnostics(): void {
+  const diagnostics = sampleStairDiagnostics(stairReplay, stairTime);
+  const summary = stairReplay?.summary.feasibility;
+  if (!stairReplay || !diagnostics || !summary) return;
+  const currentTorque = diagnostics.motorDemandNm ?? diagnostics.torqueNm;
+  const currentTorqueRatio = diagnostics.motorTorqueRatio ?? diagnostics.torqueRatio;
+
+  stStairStatus.textContent = formatFailureKinds(diagnostics.failureKinds);
+  setMetricClass(stStairStatus, diagnostics.failureKinds.length > 0 ? 'bad' : 'good');
+
+  stStairTauNow.textContent = `${fmtFinite(currentTorque, 2)} / ${fmtFinite(
+    diagnostics.torqueLimitNm,
+    2,
+  )} (${fmtFinite(currentTorqueRatio, 1)}x)`;
+  setMetricClass(
+    stStairTauNow,
+    currentTorqueRatio > 1 ? 'bad' : currentTorqueRatio > 0.8 ? 'warn' : null,
+  );
+
+  stStairTau.textContent = `${fmtFinite(summary.maxTorqueNm, 2)} N·m (${fmtFinite(
+    summary.maxTorqueRatio,
+    1,
+  )}x)`;
+  setMetricClass(
+    stStairTau,
+    summary.maxTorqueRatio > 1 ? 'bad' : summary.maxTorqueRatio > 0.8 ? 'warn' : null,
+  );
+
+  stStairMuNow.textContent = `${fmtFinite(diagnostics.requiredMu, 2)} / ${fmtFinite(
+    diagnostics.friction,
+    2,
+  )}`;
+  setMetricClass(
+    stStairMuNow,
+    diagnostics.requiredMu > diagnostics.friction
+      ? 'bad'
+      : diagnostics.requiredMu > 0.8
+        ? 'warn'
+        : null,
+  );
+
+  stStairMu.textContent = `${fmtFinite(summary.maxRequiredMu, 2)} @ ${summary.worstMuTime.toFixed(
+    2,
+  )}s`;
+  setMetricClass(stStairMu, summary.maxRequiredMu > stairFriction ? 'bad' : null);
+
+  stStairSlip.textContent = `${(diagnostics.slipSpeedMps * 100).toFixed(1)} cm/s`;
+  setMetricClass(stStairSlip, diagnostics.failureKinds.includes('slip') ? 'bad' : null);
+
+  stStairClearance.textContent = `${(diagnostics.minClearanceM * 1000).toFixed(1)} mm`;
+  setMetricClass(stStairClearance, diagnostics.minClearanceM < -0.006 ? 'bad' : null);
+
+  stStairSupports.textContent = `${diagnostics.supportCount}/${stairReplay.summary.config.morphology.n}`;
+  setMetricClass(stStairSupports, diagnostics.failureKinds.includes('fall') ? 'bad' : null);
+
+  stStairFirstFailure.textContent =
+    summary.firstFailureTime === null ? 'なし' : `${summary.firstFailureTime.toFixed(2)}s`;
+  setMetricClass(stStairFirstFailure, summary.firstFailureTime === null ? 'good' : 'bad');
 }
 
 async function loadStairReplay(): Promise<void> {
-  if (stairReplay || stairReplayLoading) return;
-  stairReplayLoading = true;
-  stStairStatus.textContent = '生成中';
+  if (stairReplay) return;
+  const seq = ++stairLoadSeq;
+  stStairStatus.textContent = '物理計算中';
   try {
-    stairReplay = createKinematicStairReplay({}, 45);
+    const nextReplay = await runPhysicalStairAttemptReplay(stairOverrides(), 45);
+    if (seq !== stairLoadSeq) return;
+    stairReplay = nextReplay;
     stairView.setReplay(stairReplay);
     const s = stairReplay.summary;
-    const ratio = s.staticArcPeakNm > 1e-9 ? s.maxDemandTorqueNm / s.staticArcPeakNm : Infinity;
-    stStairStatus.textContent = s.success ? 'success' : 'failed';
-    stStairTau.textContent = `${s.maxDemandTorqueNm.toFixed(3)} N·m`;
-    stStairRatio.textContent = `${ratio.toFixed(2)}x`;
-    stStairMu.textContent = s.maxMuDemand.toFixed(2);
     stStairHead.textContent = `${(s.finalHeadTip[0] * 100).toFixed(1)}, ${(s.finalHeadTip[1] * 100).toFixed(1)}cm`;
     updateStairControls();
   } catch (err) {
     stStairStatus.textContent = 'error';
     console.error(err);
-  } finally {
-    stairReplayLoading = false;
   }
 }
 
@@ -208,6 +310,16 @@ stairProgress.addEventListener('input', () => {
 stairSpeedInput.addEventListener('input', () => {
   stairSpeed = Number(stairSpeedInput.value);
   updateStairControls();
+});
+stairTorqueCapInput.addEventListener('input', () => {
+  stairTorqueCapNm = Number(stairTorqueCapInput.value);
+  stairReplay = null;
+  void loadStairReplay();
+});
+stairFrictionInput.addEventListener('input', () => {
+  stairFriction = Number(stairFrictionInput.value);
+  stairReplay = null;
+  void loadStairReplay();
 });
 
 async function trainLoop(): Promise<void> {
