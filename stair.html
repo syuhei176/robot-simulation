@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Snake Stair Replay</title>
+    <style>
+      :root {
+        --accent: #35c8ff;
+        --panel: rgba(12, 18, 28, 0.84);
+        --text: #d8e6f2;
+        --muted: #7890a8;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #070806;
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      #panel {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        width: 300px;
+        padding: 16px 18px;
+        background: var(--panel);
+        border: 1px solid rgba(53, 200, 255, 0.25);
+        border-radius: 12px;
+        backdrop-filter: blur(8px);
+        font-size: 13px;
+        user-select: none;
+      }
+      h1 {
+        margin: 0 0 2px;
+        font-size: 15px;
+        letter-spacing: 0.04em;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 11px;
+        margin-bottom: 12px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      button {
+        flex: 1;
+        padding: 8px 10px;
+        background: rgba(53, 200, 255, 0.12);
+        color: var(--text);
+        border: 1px solid rgba(53, 200, 255, 0.4);
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button.active {
+        background: var(--accent);
+        color: #04121b;
+        font-weight: 600;
+      }
+      label {
+        margin: 9px 0 3px;
+        font-size: 11px;
+        color: var(--muted);
+        display: flex;
+        justify-content: space-between;
+      }
+      label span {
+        color: var(--accent);
+      }
+      input[type='range'] {
+        width: 100%;
+        accent-color: var(--accent);
+      }
+      .stats {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid rgba(53, 200, 255, 0.18);
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 5px 10px;
+        font-variant-numeric: tabular-nums;
+        font-size: 12px;
+      }
+      .stats b {
+        color: var(--accent);
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="panel">
+      <h1>SNAKE · STAIR</h1>
+      <div class="sub">Rapier dynamic replay</div>
+      <div class="row">
+        <button id="btn-play" class="active">⏸ 一時停止</button>
+        <button id="btn-reset">先頭へ</button>
+      </div>
+      <label>再生位置 <span id="v-time">0.00s</span></label>
+      <input id="s-time" type="range" min="0" max="4" step="0.01" value="0" />
+      <label>再生速度 <span id="v-speed">1.00x</span></label>
+      <input id="s-speed" type="range" min="0.25" max="2" step="0.05" value="1" />
+      <div class="stats">
+        <div>状態</div>
+        <div><b id="st-status">生成中</b></div>
+        <div>動的ピーク</div>
+        <div><b id="st-tau">—</b></div>
+        <div>静的比</div>
+        <div><b id="st-ratio">—</b></div>
+        <div>μ要求</div>
+        <div><b id="st-mu">—</b></div>
+        <div>head tip</div>
+        <div><b id="st-head">—</b></div>
+      </div>
+    </div>
+    <script type="module" src="/src/stair-viewer.ts"></script>
+  </body>
+</html>

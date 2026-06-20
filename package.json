@@ -1,0 +1,37 @@
+{
+  "name": "microbots-rl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Baymax-style microbot chain that learns to crawl via deep RL, in Three.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "sanity": "node scripts/sanity.ts",
+    "rl-smoke": "node scripts/rl-smoke.ts",
+    "motor-sizing": "node scripts/motor-sizing.ts",
+    "stair-dynamics": "node scripts/stair-dynamics.ts",
+    "env-check": "node scripts/env-check.ts",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "type-check": "tsc --noEmit",
+    "quality-check": "pnpm lint && pnpm format:check && pnpm type-check"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
+    "@tensorflow/tfjs": "^4.22.0",
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.13.0",
+    "@types/three": "^0.184.1",
+    "eslint": "^9.13.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.11.0",
+    "vite": "^5.4.10"
+  }
+}
