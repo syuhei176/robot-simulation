@@ -29,12 +29,16 @@ import {
   resolveConfig,
   scaledBodyOverrides,
   bodyScale,
+  layoutOf,
+  captureFrame,
   DEFAULT_QUAD_DYN_CONFIG,
   DEG,
   KNEE_SIGN,
   MOTOR_AXIS_SIGN,
   type QuadAssembly,
   type QuadDynConfig,
+  type QuadFrame,
+  type QuadDynReplay,
 } from '../sim3d/quadruped-dynamics.ts';
 import type { RLEnv, StepResult } from '../rl/RLEnv.ts';
 
@@ -103,6 +107,7 @@ export class QuadEnv implements RLEnv {
   private readonly knee0: number;
   private readonly vBody: number; // 土台歩容の基準前進速度（足が世界で固定される速度）
   private readonly maxDelta: Float64Array; // 各 action 次元の残差可動幅（hip/knee 交互）
+  private readonly terrainOffsets: number[]; // 前方地形プレビューの胴前方オフセット [m]
 
   private world!: RAPIER.World;
   private asm!: QuadAssembly;
@@ -117,6 +122,16 @@ export class QuadEnv implements RLEnv {
   private stepCount = 0;
   private prevX = 0;
   private readonly obs: Float32Array;
+  // ダッシュボード再生用のフレーム記録（決定論ロールアウト時のみ有効化）。
+  private recording = false;
+  private frames: QuadFrame[] = [];
+  private recordT = 0;
+  private epMaxDemand = 0;
+  private epMaxApplied = 0;
+  private epSatSteps = 0;
+  private epMinZ = Infinity;
+  private epMaxTilt = 0;
+  private epFellTime: number | null = null;
 
   private constructor(cfg: QuadEnvConfig) {
     this.cfg = cfg;
@@ -150,9 +165,13 @@ export class QuadEnv implements RLEnv {
     this.hip0 = p1; // hip rel = p1 - trunkPitch(0)
     this.knee0 = p2 - p1;
 
+    // 前方地形プレビュー: 胴前方 [0.5,1,1.5,2]×胴長 の地形高さ（胴直下からの相対）。平地では全0で無害、
+    // 合成コース等の段差を「事前に」観測させて地形適応RLに使う（obs を常時含めて env を統一）。
+    this.terrainOffsets = [0.5, 1.0, 1.5, 2.0].map((k) => k * this.dyn.trunk.length);
+
     this.actDim = 8; // hip/knee × 4 脚
-    // 観測: 位相(2) + pitch + pitchRate + vForward + vVert + clearance(1) + 関節相対角(8) = 15
-    this.obsDim = 7 + 8;
+    // 観測: 位相(2) + pitch + pitchRate + vForward + vVert + clearance(1) + 関節相対角(8) + 地形プレビュー(4) = 19
+    this.obsDim = 7 + 8 + this.terrainOffsets.length;
     this.obs = new Float32Array(this.obsDim);
     this.prevResidual = new Float64Array(this.actDim);
     this.curResidual = new Float64Array(this.actDim);
@@ -209,7 +228,42 @@ export class QuadEnv implements RLEnv {
     // 残差ゼロから始める（action=0 で土台の歩容そのもの／end-to-end なら静止立脚）。
     this.prevResidual.fill(0);
     this.curResidual.fill(0);
+    // 記録状態リセット（recording は enableRecording() で立てる）。
+    this.frames = [];
+    this.recordT = 0;
+    this.epMaxDemand = 0;
+    this.epMaxApplied = 0;
+    this.epSatSteps = 0;
+    this.epMinZ = this.standZ;
+    this.epMaxTilt = 0;
+    this.epFellTime = null;
     return this.writeObs();
+  }
+
+  /** 次エピソードのフレームを記録する（決定論ロールアウト→ダッシュボード再生用）。reset() 後に呼ぶ。 */
+  enableRecording(): void {
+    this.recording = true;
+    this.frames = [];
+    this.recordT = 0;
+  }
+
+  /** 記録したフレームから QuadDynReplay（layout+frames+summary）を組み立てる。 */
+  getReplay(): QuadDynReplay {
+    const forwardDistanceM = this.asm.trunk.translation().x - this.startX;
+    const fell = this.epFellTime !== null;
+    const summary = {
+      config: this.dyn,
+      forwardDistanceM,
+      maxDemandNm: this.epMaxDemand,
+      maxAppliedNm: this.epMaxApplied,
+      saturatedSteps: this.epSatSteps,
+      minTrunkZ: this.epMinZ,
+      maxTiltDeg: this.epMaxTilt,
+      fell,
+      fellTime: this.epFellTime,
+      success: !fell && forwardDistanceM > this.dyn.trunk.length * 0.5,
+    };
+    return { layout: layoutOf(this.dyn), frames: this.frames, summary };
   }
 
   /**
@@ -243,6 +297,8 @@ export class QuadEnv implements RLEnv {
     const clockW = TAU * this.cfg.clockFreq;
     let satCount = 0;
     let satSamples = 0;
+    let stepDemand = 0;
+    let stepApplied = 0;
     for (let sub = 0; sub < totalSub; sub++) {
       // 残差を前ステップ値から新値へ線形補間（角速度スパイクを避ける）。土台ターゲットは毎サブステップ再計算。
       const alpha = (sub + 1) / totalSub;
@@ -276,6 +332,8 @@ export class QuadEnv implements RLEnv {
         satSamples += 2;
         if (hip.demand - hip.applied > 1e-9) satCount++;
         if (knee.demand - knee.applied > 1e-9) satCount++;
+        stepDemand = Math.max(stepDemand, hip.demand, knee.demand);
+        stepApplied = Math.max(stepApplied, hip.applied, knee.applied);
       }
       stabilizeLateral(
         this.asm.trunk,
@@ -320,6 +378,29 @@ export class QuadEnv implements RLEnv {
 
     this.stepCount++;
     const done = fell || this.stepCount >= this.cfg.episodeSteps;
+
+    if (this.recording) {
+      const saturated = satCount > 0;
+      this.epMaxDemand = Math.max(this.epMaxDemand, stepDemand);
+      this.epMaxApplied = Math.max(this.epMaxApplied, stepApplied);
+      if (saturated) this.epSatSteps++;
+      this.epMinZ = Math.min(this.epMinZ, z);
+      this.epMaxTilt = Math.max(this.epMaxTilt, tiltDeg);
+      if (fell && this.epFellTime === null) this.epFellTime = this.recordT;
+      this.frames.push(
+        captureFrame(this.asm, this.recordT, {
+          demandNm: stepDemand,
+          appliedNm: stepApplied,
+          saturated,
+          trunkZ: z,
+          tiltDeg,
+          forwardX: x - this.startX,
+          fallen: fell,
+        }),
+      );
+      this.recordT += this.controlPeriod;
+    }
+
     return { obs: this.writeObs(), reward, done };
   }
 
@@ -345,6 +426,15 @@ export class QuadEnv implements RLEnv {
       const shinPitch = pitchAboutY(L.shin);
       o[7 + leg * 2] = thighPitch - trunkPitch; // hip rel
       o[7 + leg * 2 + 1] = shinPitch - thighPitch; // knee rel
+    }
+    // 前方地形プレビュー: 各オフセット先の地形高さ − 胴直下の地形高さ（脚リーチで正規化）。平地は全0。
+    const trunkX = trunk.translation().x;
+    const baseTerrain = terrainTopAt(this.course, trunkX);
+    const reach = this.dyn.leg.thigh + this.dyn.leg.shin;
+    const tBase = 7 + 8;
+    for (let i = 0; i < this.terrainOffsets.length; i++) {
+      o[tBase + i] =
+        (terrainTopAt(this.course, trunkX + this.terrainOffsets[i]) - baseTerrain) / reach;
     }
     // NaN ガード（数値破綻時に学習を壊さない）。
     for (let i = 0; i < this.obsDim; i++) if (!Number.isFinite(o[i])) o[i] = 0;

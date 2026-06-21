@@ -11,7 +11,7 @@
  * CLI 側で回し、学習した方策の重み＋メタを `public/policies/quad-<course>-<motor>.json` に保存する。
  * 既定は 150g・SCS0009 の小型四足を平地で歩かせるタスク。
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as tf from '@tensorflow/tfjs';
@@ -105,12 +105,14 @@ function parseArgs(argv: string[]): Options {
   return opts;
 }
 
-/** 学習済み方策を決定論（平均行動）で1エピソード走らせ、前進量と転倒を測る。 */
+/** 学習済み方策を決定論（平均行動）で1エピソード走らせ、前進量と転倒を測る。record でフレーム記録。 */
 function evaluate(
   env: QuadEnv,
   policy: Policy,
+  record = false,
 ): { forwardM: number; steps: number; fell: boolean } {
   let obs = env.reset();
+  if (record) env.enableRecording();
   const startX = env.progressMetric();
   let steps = 0;
   let done = false;
@@ -224,9 +226,10 @@ async function main(): Promise<void> {
     );
   }
 
-  // ベスト（決定論で最良）重みで最終評価。
+  // ベスト（決定論で最良）重みで最終評価＋フレーム記録（ダッシュボード再生用）。
   policy.importWeights(bestWeights);
-  const evalRes = evaluate(env, policy);
+  const evalRes = evaluate(env, policy, true);
+  const replay = env.getReplay();
   console.log('');
   console.log(
     `=== 結果 === 決定論評価: 前進 ${(evalRes.forwardM * 100).toFixed(1)}cm / ${evalRes.steps}ステップ / ${evalRes.fell ? '転倒' : '転倒なし'}`,
@@ -267,7 +270,28 @@ async function main(): Promise<void> {
   mkdirSync(OUT_DIR, { recursive: true });
   const fileName = `quad-${opts.course}-${servo.id}.json`;
   writeFileSync(join(OUT_DIR, fileName), JSON.stringify(record) + '\n');
-  console.log(`  書き出し: public/policies/${fileName}`);
+
+  // ダッシュボード再生用の記録（meta + layout+frames+summary）。weights は重いので別ファイル＝.replay.json を
+  // コミット対象にする（.gitignore で weights だけ無視）。フレーム数値は 5 桁に丸めてサイズ削減。
+  const replayFile = `quad-${opts.course}-${servo.id}.replay.json`;
+  const replayRecord = {
+    meta: {
+      mechanism: 'quad',
+      course: opts.course,
+      motor: servo.id,
+      motorName: servo.name,
+      mass: opts.mass,
+      base: opts.baseGait ? baseLabel : 'stance',
+      forwardM: round4(evalRes.forwardM),
+      fell: evalRes.fell,
+    },
+    replay,
+  };
+  const round5 = (_k: string, v: unknown): unknown =>
+    typeof v === 'number' ? Number(v.toFixed(5)) : v;
+  writeFileSync(join(OUT_DIR, replayFile), JSON.stringify(replayRecord, round5) + '\n');
+  rebuildPolicyManifest();
+  console.log(`  書き出し: public/policies/${fileName} + ${replayFile}（+ manifest.json）`);
 
   env.dispose();
   policy.dispose();
@@ -276,6 +300,19 @@ async function main(): Promise<void> {
 
 function round4(x: number): number {
   return Number(x.toFixed(4));
+}
+
+/** public/policies/*.replay.json を走査して manifest.json（ダッシュボードの RL 再生一覧）を作り直す。 */
+function rebuildPolicyManifest(): void {
+  const entries = readdirSync(OUT_DIR)
+    .filter((f) => f.endsWith('.replay.json'))
+    .map((file) => {
+      const rec = JSON.parse(readFileSync(join(OUT_DIR, file), 'utf8')) as {
+        meta: Record<string, unknown>;
+      };
+      return { file, ...rec.meta };
+    });
+  writeFileSync(join(OUT_DIR, 'manifest.json'), JSON.stringify(entries, null, 2) + '\n');
 }
 
 await main();

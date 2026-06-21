@@ -3,5 +3,8 @@ dist
 .DS_Store
 *.local
 
-# RL 学習の出力（重み JSON・大きく再生成可能。ダッシュボード未消費なので追跡しない）
-public/policies
+# RL 学習の出力。重み JSON（大きく再生成可能）は追跡せず、ダッシュボード再生用の
+# .replay.json（フレーム記録・軽量）と manifest.json はコミットする。
+public/policies/*.json
+!public/policies/*.replay.json
+!public/policies/manifest.json

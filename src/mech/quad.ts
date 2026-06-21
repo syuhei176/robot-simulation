@@ -127,6 +127,19 @@ class QuadReplay implements MechReplay {
   }
 }
 
+/**
+ * 記録済みの四足リプレイ（オフライン RL 方策の決定論ロールアウト frames）から MechReplay を作る。
+ * ダッシュボードが `public/policies/*.replay.json` を読み込んで再生するための入口（TF.js 不要）。
+ */
+export function recordedQuadReplay(
+  replay: QuadDynReplay,
+  torqueCapNm: number,
+  motorName: string,
+  course: CourseSpec,
+): MechReplay {
+  return new QuadReplay(replay, torqueCapNm, motorName, course);
+}
+
 export const quadMechanism: Mechanism = {
   id: 'quad',
   name: '機構: 四足',

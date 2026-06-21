@@ -9,6 +9,8 @@ import { StairDynamicsView } from './render/StairDynamicsView.ts';
 import { getServo, SELECTABLE_SERVO_IDS } from './sim3d/servos.ts';
 import { COURSES, COURSE_OPTIONS, type CourseId } from './sim3d/course.ts';
 import { MECHANISMS, getMechanism } from './mech/registry.ts';
+import { recordedQuadReplay } from './mech/quad.ts';
+import type { QuadDynReplay } from './sim3d/quadruped-dynamics.ts';
 import {
   defaultParamValues,
   type MechParam,
@@ -44,6 +46,7 @@ const statsBox = el<HTMLDivElement>('stats');
 const mechSubtitle = el<HTMLDivElement>('mech-subtitle');
 const btnScripted = el<HTMLButtonElement>('btn-scripted');
 const btnTuned = el<HTMLButtonElement>('btn-tuned');
+const btnRL = el<HTMLButtonElement>('btn-rl');
 const tunedInfo = el<HTMLDivElement>('tuned-info');
 const improveCurve = el<HTMLCanvasElement>('improve-curve');
 
@@ -70,6 +73,26 @@ interface TunedRecord extends TunedManifestEntry {
   history: Array<{ gen: number; best: number; mean: number; progressM: number }>;
 }
 
+// ---- RL 方策（オフライン PPO の成果物・決定論ロールアウトの記録）の型 ----
+/** public/policies/manifest.json の1エントリ。 */
+interface PolicyManifestEntry {
+  file: string;
+  mechanism: string;
+  course: string;
+  motor: string;
+  mass: number;
+  base: string;
+  forwardM: number;
+  fell: boolean;
+}
+/** public/policies/<file>.replay.json（meta + 記録リプレイ）。 */
+interface PolicyReplayFile {
+  meta: PolicyManifestEntry;
+  replay: QuadDynReplay;
+}
+
+type MotionMode = 'scripted' | 'tuned' | 'rl';
+
 // ---- 状態 ----
 // 既定は「小型四足 × SCS0009 × 平地」= 150g 級の安価な四足が cap 内で歩くデモ（箱出しで前進する）。
 // 段差走破（合成コース）を見るには 四足 + STS3215（大型機体）+ tuned を選ぶ。
@@ -85,8 +108,10 @@ let speed = 1;
 let loadSeq = 0;
 let lastTimestamp: number | null = null;
 let manifest: TunedManifestEntry[] = [];
-let useTuned = false;
+let policyManifest: PolicyManifestEntry[] = [];
+let motionMode: MotionMode = 'scripted';
 const tunedCache = new Map<string, TunedRecord>();
+const policyCache = new Map<string, PolicyReplayFile>();
 
 // ---- ドロップダウン生成（単一の真実から） ----
 for (const mech of MECHANISMS) {
@@ -192,13 +217,36 @@ async function loadTunedRecord(entry: TunedManifestEntry): Promise<TunedRecord> 
   return record;
 }
 
-/** tuned ボタンの有効/無効と選択状態を現在の選択に同期する（結果が無ければ scripted に戻す）。 */
-function updateTunedAvailability(): void {
-  const entry = findTunedEntry();
-  btnTuned.disabled = entry === null;
-  if (entry === null) useTuned = false;
-  btnTuned.classList.toggle('active', useTuned);
-  btnScripted.classList.toggle('active', !useTuned);
+/** 現在の 機構×コース×モーター に対応する RL 方策（記録リプレイ）を policy manifest から探す。 */
+function findPolicyEntry(): PolicyManifestEntry | null {
+  return (
+    policyManifest.find(
+      (e) => e.mechanism === mechId && e.motor === motorId && e.course === effectiveCourse(),
+    ) ?? null
+  );
+}
+
+async function loadPolicyReplay(entry: PolicyManifestEntry): Promise<PolicyReplayFile> {
+  const cached = policyCache.get(entry.file);
+  if (cached) return cached;
+  const res = await fetch(`./policies/${entry.file}`);
+  if (!res.ok) throw new Error(`RL リプレイを取得できません: ${entry.file}`);
+  const record = (await res.json()) as PolicyReplayFile;
+  policyCache.set(entry.file, record);
+  return record;
+}
+
+/** scripted/tuned/RL ボタンの有効/無効と選択状態を同期する（無いモードを選んでいたら scripted に戻す）。 */
+function updateModeAvailability(): void {
+  const hasTuned = findTunedEntry() !== null;
+  const hasPolicy = findPolicyEntry() !== null;
+  btnTuned.disabled = !hasTuned;
+  btnRL.disabled = !hasPolicy;
+  if (motionMode === 'tuned' && !hasTuned) motionMode = 'scripted';
+  if (motionMode === 'rl' && !hasPolicy) motionMode = 'scripted';
+  btnScripted.classList.toggle('active', motionMode === 'scripted');
+  btnTuned.classList.toggle('active', motionMode === 'tuned');
+  btnRL.classList.toggle('active', motionMode === 'rl');
 }
 
 function syncTorqueUI(): void {
@@ -283,11 +331,46 @@ function scheduleRun(): void {
   }, 160);
 }
 
-// ---- 選択変更の共通経路: tuned 可否を更新し、tuned/scripted に応じて歩容を反映して再計算 ----
+// ---- RL: 記録済みリプレイ（決定論ロールアウトの frames）を読み込んで再生する ----
+async function runRL(): Promise<void> {
+  const entry = findPolicyEntry();
+  if (!entry) {
+    motionMode = 'scripted';
+    await reload();
+    return;
+  }
+  const seq = ++loadSeq;
+  renderStats([{ label: '状態', value: 'RL 記録を読み込み中…' }]);
+  const record = await loadPolicyReplay(entry);
+  if (seq !== loadSeq) return; // 競合ガード
+  torqueCapNm = getServo(motorId).stallNm;
+  syncTorqueUI();
+  drawImproveCurve(null);
+  tunedInfo.textContent = `RL 方策（土台=${entry.base}）・前進 ${(entry.forwardM * 100).toFixed(0)}cm${entry.fell ? '（転倒）' : ''}`;
+  buildParamSliders();
+  const rl = recordedQuadReplay(
+    record.replay,
+    torqueCapNm,
+    getServo(motorId).name,
+    COURSES[courseId](),
+  );
+  replay = rl;
+  rl.bindView(view);
+  playbackTime = 0;
+  setPlaying(true);
+  rl.applyTime(view, 0);
+  updateControls();
+}
+
+// ---- 選択変更の共通経路: モード可否を更新し、scripted/tuned/RL に応じて歩容を反映して再計算 ----
 async function reload(): Promise<void> {
-  updateTunedAvailability();
+  updateModeAvailability();
   const mech = getMechanism(mechId);
-  const entry = useTuned ? findTunedEntry() : null;
+  if (motionMode === 'rl') {
+    await runRL();
+    return;
+  }
+  const entry = motionMode === 'tuned' ? findTunedEntry() : null;
   if (entry) {
     // tuned: 最適化済みの厳密な float をそのまま適用（スライダーの step に丸めない＝崖系でも再現）。
     const record = await loadTunedRecord(entry);
@@ -312,7 +395,7 @@ async function reload(): Promise<void> {
 function applyMechanism(): void {
   const mech = getMechanism(mechId);
   mechSubtitle.textContent = mech.subtitle;
-  useTuned = false;
+  motionMode = 'scripted';
   paramValues = defaultParamValues(mech);
   torqueCapNm = getServo(motorId).stallNm;
   syncTorqueUI();
@@ -339,16 +422,21 @@ selCourse.addEventListener('change', () => {
   void reload();
 });
 btnScripted.addEventListener('click', () => {
-  if (!useTuned) return;
-  useTuned = false;
+  if (motionMode === 'scripted') return;
+  motionMode = 'scripted';
   paramValues = defaultParamValues(getMechanism(mechId));
   torqueCapNm = getServo(motorId).stallNm;
   syncTorqueUI();
   void reload();
 });
 btnTuned.addEventListener('click', () => {
-  if (useTuned || btnTuned.disabled) return;
-  useTuned = true;
+  if (motionMode === 'tuned' || btnTuned.disabled) return;
+  motionMode = 'tuned';
+  void reload();
+});
+btnRL.addEventListener('click', () => {
+  if (motionMode === 'rl' || btnRL.disabled) return;
+  motionMode = 'rl';
   void reload();
 });
 torqueCapInput.addEventListener('input', () => {
@@ -399,6 +487,12 @@ async function init(): Promise<void> {
     if (res.ok) manifest = (await res.json()) as TunedManifestEntry[];
   } catch {
     // manifest 不在（オフライン最適化を未実施）は許容。tuned ボタンは無効のまま。
+  }
+  try {
+    const res = await fetch('./policies/manifest.json');
+    if (res.ok) policyManifest = (await res.json()) as PolicyManifestEntry[];
+  } catch {
+    // policy manifest 不在（RL 未学習）は許容。RL ボタンは無効のまま。
   }
   await reload();
 }

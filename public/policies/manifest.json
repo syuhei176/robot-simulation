@@ -1,0 +1,24 @@
+[
+  {
+    "file": "quad-combined-sts3215.replay.json",
+    "mechanism": "quad",
+    "course": "combined",
+    "motor": "sts3215",
+    "motorName": "Feetech STS3215 (12V)",
+    "mass": 1.2,
+    "base": "tuned歩容(quad-combined-sts3215.json)",
+    "forwardM": 0.9314,
+    "fell": false
+  },
+  {
+    "file": "quad-flat-scs0009.replay.json",
+    "mechanism": "quad",
+    "course": "flat",
+    "motor": "scs0009",
+    "motorName": "Feetech SCS0009 (6V)",
+    "mass": 0.15,
+    "base": "tuned歩容(quad-flat-scs0009.json)",
+    "forwardM": 0.5403,
+    "fell": false
+  }
+]

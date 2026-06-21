@@ -188,11 +188,14 @@
       <div class="section-title">モーション（初期歩容を与える）</div>
       <!-- sliders injected from mechanism.params in dashboard.ts -->
       <div id="param-sliders"></div>
-      <div class="section-title">学習済み歩容（オフライン CMA-ES）</div>
+      <div class="section-title">学習済み歩容（CMA-ES / RL）</div>
       <div class="row">
         <button id="btn-scripted" class="active">scripted</button>
         <button id="btn-tuned" disabled title="この 機構×コース×モーター の最適化結果はありません">
           tuned
+        </button>
+        <button id="btn-rl" disabled title="この 機構×コース×モーター の RL 方策はありません">
+          RL
         </button>
       </div>
       <div class="tuned-info" id="tuned-info"></div>
