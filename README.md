@@ -29,8 +29,6 @@
   CMA-ES 最適化（目的＝前進量−物理破綻ペナルティ。機構が宣言する `replay.score()` で機構非依存）。
   結果（調整済みパラメータ＋改善履歴）を `public/tuned/*.json` に出力し、ダッシュボードで
   **scripted ↔ tuned を切り替えて再生・改善カーブを表示**する。`pnpm optimize-gait`
-- **平面歩容の学習（RL）** — 平面の蛇型で前進歩容を自前 PPO で学習するデモ（`playground.html`）。
-  忠実な接触・トルク上限が揃ったので、登攀歩容の学習にも展開できる土台。
 - **3D 四足の強化学習（残差RL・地形適応）** — `runQuadrupedGait` を 1 制御ステップずつ進められる RL 環境
   `QuadEnv`（`src/env/QuadEnv.ts`）に展開。方策が 8 関節（hip×4 + knee×4）を制御する。既定は **残差RL**＝
   IK クロール歩容に方策の補正を上乗せ（`--base-tuned auto` で CMA-ES の速い tuned 歩容を土台にできる）。
@@ -72,7 +70,6 @@ pnpm dev          # http://localhost:5173
   - **scripted / tuned / RL 切替** … `pnpm optimize-gait` の結果（`public/tuned/`）がある 機構×コース×モーター で
     **tuned** が、`pnpm train-quad` の RL 方策記録（`public/policies/`）がある組合せで **RL** が有効になる。
     tuned は調整済み歩容＋改善カーブ、RL は学習方策の記録リプレイ（frames）を再生する。
-- `http://localhost:5173/playground.html` … 平面蛇型の歩容学習（手動 CPG / PPO）デモ
 
 ## コマンド（Node 24 で実行）
 
@@ -118,14 +115,13 @@ pnpm quality-check  # lint + format:check + type-check
 - [`scripts/optimize-gait.ts`](scripts/optimize-gait.ts) … CMA-ES（Jacobi 固有値分解つき・seed 再現可）で歩容をオフライン最適化。
 - [`scripts/train-quad.ts`](scripts/train-quad.ts) … 3D 四足の end-to-end RL（PPO）をオフライン学習し方策を `public/policies/` に保存。
 
-歩容の学習（`src/sim`, `src/env`, `src/rl`, `src/render`）:
+歩容の学習（`src/sim`, `src/env`, `src/rl`）— すべて Node でオフライン実行（蛇=`pnpm rl-smoke` / 四足=`pnpm train-quad`）:
 
 - 物理 [`SnakePhysics.ts`](src/sim/SnakePhysics.ts) … 抵抗力ベースの準静的モデル（Hirose 標準モデル）。
   異方性摩擦の力・トルク釣り合いを 3×3 線形系で解き、前進が振幅/周波数に滑らかに応答する。
 - 環境 [`MicrobotEnv.ts`](src/env/MicrobotEnv.ts)（平面蛇・行動→CPG パラメータ）/ [`QuadEnv.ts`](src/env/QuadEnv.ts)
   （3D 四足・行動→8 関節目標角, `runQuadrupedGait` をステップ化）。どちらも共通契約 [`RLEnv.ts`](src/rl/RLEnv.ts)。
-- 方策/学習 [`Policy.ts`](src/rl/Policy.ts) / [`PPO.ts`](src/rl/PPO.ts) … TensorFlow.js の小さな MLP＋自前 PPO。
-  ブラウザ（蛇）でも Node オフライン（四足）でも回せる。
+- 方策/学習 [`Policy.ts`](src/rl/Policy.ts) / [`PPO.ts`](src/rl/PPO.ts) … TensorFlow.js の小さな MLP＋自前 PPO（Node オフライン）。
 
 ## 設計メモ・ハンドオフ
 
