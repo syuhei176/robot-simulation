@@ -18,6 +18,10 @@
   cap→前進距離が単調・総質量に応答するので、**重さ × サーボ** で歩ける/失速するを判定できる。`pnpm quadruped`
 - **統合ダッシュボード** — `index.html` で **機構（蛇/四足）× コース（階段/低い階段/小障害物/平地）× モーター × 歩容パラメータ** を
   1画面で切り替えて挙動を再生。新機構は `src/mech` に `Mechanism` を1つ足すだけで現れる。
+- **オフライン歩容最適化（CMA-ES）** — 歩容パラメータを Mac/Node のヘッドレス Rapier 上で
+  CMA-ES 最適化（目的＝前進量−物理破綻ペナルティ。機構が宣言する `replay.score()` で機構非依存）。
+  結果（調整済みパラメータ＋改善履歴）を `public/tuned/*.json` に出力し、ダッシュボードで
+  **scripted ↔ tuned を切り替えて再生・改善カーブを表示**する。`pnpm optimize-gait`
 - **平面歩容の学習（RL）** — 平面の蛇型で前進歩容を自前 PPO で学習するデモ（`playground.html`）。
   忠実な接触・トルク上限が揃ったので、登攀歩容の学習にも展開できる土台。
 
@@ -34,6 +38,8 @@ pnpm dev          # http://localhost:5173
 - `http://localhost:5173/` … 統合ダッシュボード（機構 × コース × モーター × 歩容パラメータ）
   - 蛇＝コース physical attempt（赤: 落下/干渉、オレンジ: トルク超過、黄: 滑り、水色: 支持接触）。コース選択で階段/低い階段/小障害物/平地を切替。
   - 四足＝3D 動的歩行（モーター選択で τ上限を自動設定、歩容スライダーで period/stride/lift 等を調整）。現状は平地のみ。
+  - **scripted / tuned 切替** … `pnpm optimize-gait` の最適化結果（`public/tuned/`）がある 機構×コース×モーター で
+    tuned ボタンが有効になり、調整済み歩容＋改善カーブを再生する。
 - `http://localhost:5173/playground.html` … 平面蛇型の歩容学習（手動 CPG / PPO）デモ
 
 ## コマンド（Node 24 で実行）
@@ -42,6 +48,14 @@ pnpm dev          # http://localhost:5173
 pnpm motor-sizing   # 形状→モーター逆算＋機構×モーター比較＋軽量化スイープ
 pnpm quadruped      # 四足 3D 動的歩行レポート＋静的サーボ選定スイープ
 pnpm stair-dynamics # 階段の Rapier 動的プローブ＋完全 physical attempt 診断
+pnpm optimize-gait  # 歩容を CMA-ES でオフライン最適化 → public/tuned/*.json（--mech/--course/--motor/--gens/--seed）
+```
+
+`optimize-gait` の主なオプション（既定: `--mech quad --course stairs --motor sts3215 --gens 20 --seed 1`）:
+
+```bash
+pnpm optimize-gait --mech quad  --motor sts3215            # 四足の歩容（period/stride/lift/stand/duty）を平地で最適化
+pnpm optimize-gait --mech snake --course lowStairs         # 蛇の歩容（referenceSpeed/clearance）を低い階段で最適化
 pnpm sanity         # 平面物理: CPG 駆動で前進・数値安定を確認
 pnpm rl-smoke       # 平面 RL: 数イテレーションで学習が伸びる/NaN なしを確認
 pnpm quality-check  # lint + format:check + type-check
@@ -58,7 +72,14 @@ pnpm quality-check  # lint + format:check + type-check
 - [`stair-dynamics.ts`](src/sim3d/stair-dynamics.ts) … 階段の Rapier 動的接触シミュレーション。
 - [`stair-kinematic-replay.ts`](src/sim3d/stair-kinematic-replay.ts) / [`stair-feasibility.ts`](src/sim3d/stair-feasibility.ts) / [`stair-physical-attempt.ts`](src/sim3d/stair-physical-attempt.ts)
   … 完全階段登りの目標軌道・実現可能性診断・失敗も動く physical attempt。
-- [`StairDynamicsView.ts`](src/render/StairDynamicsView.ts) / [`stair-viewer.ts`](src/stair-viewer.ts) … ビューア。
+- [`StairDynamicsView.ts`](src/render/StairDynamicsView.ts) … 共有レンダラ（蛇の連鎖・四足・コースを描く）。
+- [`course.ts`](src/sim3d/course.ts) … コース（地形）の単一の真実（階段/低い階段/小障害物/平地）。
+
+統合ダッシュボードと歩容最適化:
+
+- [`src/mech/`](src/mech/) … 機構抽象。`Mechanism`（蛇/四足の `run` と `score`）＋ `registry`。新機構はここに1つ足すだけ。
+- [`dashboard.ts`](src/dashboard.ts) … 機構 × コース × モーター × 歩容 を1画面で切替＋ scripted/tuned 再生（`index.html`）。
+- [`scripts/optimize-gait.ts`](scripts/optimize-gait.ts) … CMA-ES（Jacobi 固有値分解つき・seed 再現可）で歩容をオフライン最適化。
 
 平面歩容の学習（`src/sim`, `src/env`, `src/rl`, `src/render`）:
 

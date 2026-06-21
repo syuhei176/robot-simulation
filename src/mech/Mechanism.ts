@@ -19,6 +19,25 @@ export interface MechParam {
   default: number;
   /** 表示単位（任意）。スライダー右の数値に添える。 */
   unit?: string;
+  /**
+   * オフライン歩容最適化（`scripts/optimize-gait.ts`）の探索対象に含めるか（既定: true）。
+   * 環境・機体設計のつまみ（蛇の床摩擦 μ・四足の総質量）は歩容の制御量ではないので false にし、
+   * 最適化中は既定値に固定する。ダッシュボードのスライダーには影響しない（UI は全 param を出す）。
+   */
+  optimize?: boolean;
+}
+
+/**
+ * 1回の実行の良さをスカラー化したもの。オフライン最適化（fitness を最大化）と
+ * ダッシュボードの改善カーブ表示が同じ評価を共有するための単一の真実。
+ */
+export interface MechScore {
+  /** 最適化が最大化するスカラー目的値（高いほど良い）。前進量から物理的破綻のペナルティを引いたもの。 */
+  fitness: number;
+  /** 主目的の前進量 [m]（人が読む・改善カーブの縦軸）。 */
+  progressM: number;
+  /** 物理的に成立したか（転倒/未走破でなく、トルク・摩擦も充足）。 */
+  feasible: boolean;
 }
 
 /** 統計パネルの1行。 */
@@ -51,6 +70,8 @@ export interface MechReplay {
   liveStats(t: number): StatRow[];
   /** 総合結果行（実行ごとに一定）。 */
   resultStats(): StatRow[];
+  /** この実行のスカラー評価（最適化の目的・改善カーブ）。 */
+  score(): MechScore;
 }
 
 export interface Mechanism {

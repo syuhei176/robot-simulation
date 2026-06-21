@@ -9,7 +9,7 @@ import {
   type QuadDynReplay,
 } from '../sim3d/quadruped-dynamics.ts';
 import type { StairDynamicsView } from '../render/StairDynamicsView.ts';
-import type { Mechanism, MechReplay, MechRunCtx, StatRow } from './Mechanism.ts';
+import type { Mechanism, MechReplay, MechRunCtx, MechScore, StatRow } from './Mechanism.ts';
 
 const BASE_TRUNK = DEFAULT_QUAD_DYN_CONFIG.trunk.mass;
 const BASE_SEG = DEFAULT_QUAD_DYN_CONFIG.leg.segMass;
@@ -18,11 +18,14 @@ const G = DEFAULT_QUAD_DYN_CONFIG.gait;
 
 class QuadReplay implements MechReplay {
   readonly duration: number;
-  constructor(
-    private readonly replay: QuadDynReplay,
-    private readonly torqueCapNm: number,
-    private readonly motorName: string,
-  ) {
+  private readonly replay: QuadDynReplay;
+  private readonly torqueCapNm: number;
+  private readonly motorName: string;
+  // パラメータプロパティは使わない（node の型ストリップ実行で未対応のため・明示フィールドにする）。
+  constructor(replay: QuadDynReplay, torqueCapNm: number, motorName: string) {
+    this.replay = replay;
+    this.torqueCapNm = torqueCapNm;
+    this.motorName = motorName;
     this.duration = replay.summary.config.duration;
   }
 
@@ -75,6 +78,18 @@ class QuadReplay implements MechReplay {
     ];
   }
 
+  score(): MechScore {
+    const s = this.replay.summary;
+    // 目的: 転ばず・直立を保ったまま前進距離を最大化。転倒は強く減点（前へ滑り込んでも報われない）。
+    // 過度な傾き(>25°)は微減点。トルク cap は sim 側で clamp 済み＝弱いモーターは自然に前進せず低 fitness。
+    const progressM = Number.isFinite(s.forwardDistanceM) ? s.forwardDistanceM : -1;
+    const tilt = Number.isFinite(s.maxTiltDeg) ? s.maxTiltDeg : 90;
+    let fitness = progressM;
+    if (s.fell) fitness -= 0.5;
+    fitness -= 0.003 * Math.max(0, tilt - 25);
+    return { fitness, progressM, feasible: s.success };
+  }
+
   resultStats(): StatRow[] {
     const s = this.replay.summary;
     return [
@@ -113,6 +128,8 @@ export const quadMechanism: Mechanism = {
       step: 0.05,
       default: BASE_TOTAL,
       unit: 'kg',
+      // 機体設計の選択であって歩容の制御量ではない。歩容最適化中は既定値に固定。
+      optimize: false,
     },
     {
       key: 'period',

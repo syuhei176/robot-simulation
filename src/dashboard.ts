@@ -42,6 +42,33 @@ const torqueCapValue = el<HTMLSpanElement>('v-torque-cap');
 const paramSliders = el<HTMLDivElement>('param-sliders');
 const statsBox = el<HTMLDivElement>('stats');
 const mechSubtitle = el<HTMLDivElement>('mech-subtitle');
+const btnScripted = el<HTMLButtonElement>('btn-scripted');
+const btnTuned = el<HTMLButtonElement>('btn-tuned');
+const tunedInfo = el<HTMLDivElement>('tuned-info');
+const improveCurve = el<HTMLCanvasElement>('improve-curve');
+
+// ---- 学習済み歩容（オフライン CMA-ES の成果物）の型 ----
+interface TunedScore {
+  fitness: number;
+  progressM: number;
+  feasible: boolean;
+}
+/** public/tuned/manifest.json の1エントリ（利用可能な最適化結果の一覧）。 */
+interface TunedManifestEntry {
+  file: string;
+  mechanism: string;
+  course: string;
+  motor: string;
+  torqueCapNm: number;
+  baseline: TunedScore;
+  tuned: TunedScore;
+}
+/** public/tuned/<file>.json の全体（params と改善履歴を含む）。 */
+interface TunedRecord extends TunedManifestEntry {
+  optimizedKeys: string[];
+  params: Record<string, number>;
+  history: Array<{ gen: number; best: number; mean: number; progressM: number }>;
+}
 
 // ---- 状態 ----
 let mechId = MECHANISMS[0].id;
@@ -55,6 +82,9 @@ let playbackTime = 0;
 let speed = 1;
 let loadSeq = 0;
 let lastTimestamp: number | null = null;
+let manifest: TunedManifestEntry[] = [];
+let useTuned = false;
+const tunedCache = new Map<string, TunedRecord>();
 
 // ---- ドロップダウン生成（単一の真実から） ----
 for (const mech of MECHANISMS) {
@@ -135,6 +165,73 @@ function renderStats(rows: StatRow[]): void {
   }
 }
 
+// ---- 学習済み歩容（tuned）の解決・読み込み・適用 ----
+/** 非コース機構（四足）は平地固定なので manifest 照合は 'flat' を使う。 */
+function effectiveCourse(): string {
+  return getMechanism(mechId).supportsCourse ? courseId : 'flat';
+}
+
+/** 現在の 機構×コース×モーター に対応する最適化結果を manifest から探す。 */
+function findTunedEntry(): TunedManifestEntry | null {
+  return (
+    manifest.find(
+      (e) => e.mechanism === mechId && e.motor === motorId && e.course === effectiveCourse(),
+    ) ?? null
+  );
+}
+
+async function loadTunedRecord(entry: TunedManifestEntry): Promise<TunedRecord> {
+  const cached = tunedCache.get(entry.file);
+  if (cached) return cached;
+  const res = await fetch(`./tuned/${entry.file}`);
+  if (!res.ok) throw new Error(`tuned ファイルを取得できません: ${entry.file}`);
+  const record = (await res.json()) as TunedRecord;
+  tunedCache.set(entry.file, record);
+  return record;
+}
+
+/** tuned ボタンの有効/無効と選択状態を現在の選択に同期する（結果が無ければ scripted に戻す）。 */
+function updateTunedAvailability(): void {
+  const entry = findTunedEntry();
+  btnTuned.disabled = entry === null;
+  if (entry === null) useTuned = false;
+  btnTuned.classList.toggle('active', useTuned);
+  btnScripted.classList.toggle('active', !useTuned);
+}
+
+function syncTorqueUI(): void {
+  torqueCapInput.value = String(torqueCapNm);
+  torqueCapValue.textContent = `${torqueCapNm.toFixed(2)} N·m`;
+}
+
+// ---- 改善カーブ（世代ごとの best / mean fitness） ----
+function drawImproveCurve(history: TunedRecord['history'] | null): void {
+  const ctx = improveCurve.getContext('2d');
+  if (!ctx) return;
+  const w = improveCurve.width;
+  const h = improveCurve.height;
+  ctx.clearRect(0, 0, w, h);
+  if (!history || history.length < 2) return;
+  const vals = history.flatMap((p) => [p.best, p.mean]);
+  const max = Math.max(...vals);
+  const min = Math.min(...vals);
+  const range = max - min || 1;
+  const plot = (key: 'best' | 'mean', color: string, lineWidth: number): void => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.beginPath();
+    history.forEach((p, i) => {
+      const x = (i / (history.length - 1)) * (w - 4) + 2;
+      const y = h - 4 - ((p[key] - min) / range) * (h - 8);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  };
+  plot('mean', 'rgba(120, 144, 168, 0.7)', 1);
+  plot('best', '#35c8ff', 1.5);
+}
+
 // ---- 再生コントロール ----
 function setPlaying(next: boolean): void {
   playing = next;
@@ -184,17 +281,44 @@ function scheduleRun(): void {
   }, 160);
 }
 
-// ---- 機構切替: スライダー再構築・コース有効化・再計算 ----
+// ---- 選択変更の共通経路: tuned 可否を更新し、tuned/scripted に応じて歩容を反映して再計算 ----
+async function reload(): Promise<void> {
+  updateTunedAvailability();
+  const mech = getMechanism(mechId);
+  const entry = useTuned ? findTunedEntry() : null;
+  if (entry) {
+    // tuned: 最適化済みの厳密な float をそのまま適用（スライダーの step に丸めない＝崖系でも再現）。
+    const record = await loadTunedRecord(entry);
+    paramValues = { ...defaultParamValues(mech), ...record.params };
+    // τ上限は丸めた JSON 値（torqueCapNm）ではなく、最適化時と同一のサーボ stall を使う。
+    // 崖系（蛇 18cm 階段）では cap の 5e-6 差ですら結果が変わるため、単一の真実=サーボカタログに合わせる。
+    torqueCapNm = getServo(motorId).stallNm;
+    syncTorqueUI();
+    drawImproveCurve(record.history);
+    const b = record.baseline;
+    const t = record.tuned;
+    tunedInfo.textContent = `fitness ${b.fitness.toFixed(2)} → ${t.fitness.toFixed(2)} ・ 前進 ${(b.progressM * 100).toFixed(0)} → ${(t.progressM * 100).toFixed(0)}cm`;
+  } else {
+    drawImproveCurve(null);
+    tunedInfo.textContent = '';
+  }
+  buildParamSliders();
+  await run();
+}
+
+// ---- 機構切替: 既定歩容へ戻し・コース有効化・再計算（scripted から開始） ----
 function applyMechanism(): void {
   const mech = getMechanism(mechId);
   mechSubtitle.textContent = mech.subtitle;
+  useTuned = false;
   paramValues = defaultParamValues(mech);
-  buildParamSliders();
+  torqueCapNm = getServo(motorId).stallNm;
+  syncTorqueUI();
   selCourse.disabled = !mech.supportsCourse;
   selCourse.title = mech.supportsCourse
     ? 'コース（地形）'
     : 'この機構は現状 平地のみ（段差走破は後続段）';
-  void run();
+  void reload();
 }
 
 // ---- イベント配線 ----
@@ -205,13 +329,25 @@ selMech.addEventListener('change', () => {
 selMotor.addEventListener('change', () => {
   motorId = selMotor.value;
   torqueCapNm = getServo(motorId).stallNm;
-  torqueCapInput.value = String(torqueCapNm);
-  torqueCapValue.textContent = `${torqueCapNm.toFixed(2)} N·m`;
-  void run();
+  syncTorqueUI();
+  void reload();
 });
 selCourse.addEventListener('change', () => {
   courseId = selCourse.value as CourseId;
-  void run();
+  void reload();
+});
+btnScripted.addEventListener('click', () => {
+  if (!useTuned) return;
+  useTuned = false;
+  paramValues = defaultParamValues(getMechanism(mechId));
+  torqueCapNm = getServo(motorId).stallNm;
+  syncTorqueUI();
+  void reload();
+});
+btnTuned.addEventListener('click', () => {
+  if (useTuned || btnTuned.disabled) return;
+  useTuned = true;
+  void reload();
 });
 torqueCapInput.addEventListener('input', () => {
   torqueCapNm = Number(torqueCapInput.value);
@@ -253,10 +389,19 @@ function loop(timestamp: number): void {
 
 // ---- 起動 ----
 mechSubtitle.textContent = getMechanism(mechId).subtitle;
-buildParamSliders();
-torqueCapInput.value = String(torqueCapNm);
-torqueCapValue.textContent = `${torqueCapNm.toFixed(2)} N·m`;
-void run().catch((err: unknown) => {
+syncTorqueUI();
+
+async function init(): Promise<void> {
+  try {
+    const res = await fetch('./tuned/manifest.json');
+    if (res.ok) manifest = (await res.json()) as TunedManifestEntry[];
+  } catch {
+    // manifest 不在（オフライン最適化を未実施）は許容。tuned ボタンは無効のまま。
+  }
+  await reload();
+}
+
+void init().catch((err: unknown) => {
   renderStats([{ label: '状態', value: 'error', kind: 'bad' }]);
   console.error(err);
 });

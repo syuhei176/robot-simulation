@@ -1,0 +1,154 @@
+{
+  "mechanism": "snake",
+  "course": "lowStairs",
+  "motor": "sts3215",
+  "motorName": "Feetech STS3215 (12V)",
+  "torqueCapNm": 2.942,
+  "optimizedKeys": [
+    "referenceSpeed",
+    "clearance"
+  ],
+  "params": {
+    "referenceSpeed": 0.22362987256148897,
+    "clearance": 0.05395027471162152,
+    "friction": 0.6
+  },
+  "baseline": {
+    "fitness": -2.2,
+    "progressM": -1,
+    "feasible": false
+  },
+  "tuned": {
+    "fitness": 0.1937,
+    "progressM": 1.3937,
+    "feasible": false
+  },
+  "history": [
+    {
+      "gen": 0,
+      "best": -0.0031,
+      "mean": -1.4915,
+      "progressM": 1.1969
+    },
+    {
+      "gen": 1,
+      "best": 0.0731,
+      "mean": -0.8024,
+      "progressM": 1.2731
+    },
+    {
+      "gen": 2,
+      "best": -0.1069,
+      "mean": -1.1209,
+      "progressM": 1.0931
+    },
+    {
+      "gen": 3,
+      "best": -0.5185,
+      "mean": -0.902,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 4,
+      "best": -0.5185,
+      "mean": -0.6724,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 5,
+      "best": -0.5185,
+      "mean": -1.021,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 6,
+      "best": 0.1937,
+      "mean": -0.5112,
+      "progressM": 1.3937
+    },
+    {
+      "gen": 7,
+      "best": -0.5185,
+      "mean": -0.8575,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 8,
+      "best": -0.5185,
+      "mean": -0.6695,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 9,
+      "best": -0.5185,
+      "mean": -0.632,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 10,
+      "best": -0.5185,
+      "mean": -0.6612,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 11,
+      "best": 0.0716,
+      "mean": -0.3272,
+      "progressM": 1.2716
+    },
+    {
+      "gen": 12,
+      "best": -0.7403,
+      "mean": -1.2381,
+      "progressM": 0.4597
+    },
+    {
+      "gen": 13,
+      "best": 0.1639,
+      "mean": -0.721,
+      "progressM": 1.3639
+    },
+    {
+      "gen": 14,
+      "best": -0.5185,
+      "mean": -1.0214,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 15,
+      "best": -0.5676,
+      "mean": -0.8966,
+      "progressM": 0.6324
+    },
+    {
+      "gen": 16,
+      "best": -0.5185,
+      "mean": -0.776,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 17,
+      "best": -0.5185,
+      "mean": -0.9382,
+      "progressM": 0.6815
+    },
+    {
+      "gen": 18,
+      "best": 0.0503,
+      "mean": -0.6696,
+      "progressM": 1.2503
+    },
+    {
+      "gen": 19,
+      "best": -0.5185,
+      "mean": -0.6545,
+      "progressM": 0.6815
+    }
+  ],
+  "config": {
+    "gens": 20,
+    "popsize": 6,
+    "seed": 1,
+    "sigma": 0.3
+  }
+}

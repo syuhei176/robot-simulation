@@ -1,0 +1,70 @@
+[
+  {
+    "file": "quad-flat-sts3215.json",
+    "mechanism": "quad",
+    "course": "flat",
+    "motor": "sts3215",
+    "torqueCapNm": 2.942,
+    "baseline": {
+      "fitness": 0.288,
+      "progressM": 0.288,
+      "feasible": true
+    },
+    "tuned": {
+      "fitness": 1.4245,
+      "progressM": 1.4245,
+      "feasible": true
+    }
+  },
+  {
+    "file": "snake-bumps-sts3215.json",
+    "mechanism": "snake",
+    "course": "bumps",
+    "motor": "sts3215",
+    "torqueCapNm": 2.942,
+    "baseline": {
+      "fitness": -0.4564,
+      "progressM": 0.7436,
+      "feasible": false
+    },
+    "tuned": {
+      "fitness": 0.6161,
+      "progressM": 1.8161,
+      "feasible": false
+    }
+  },
+  {
+    "file": "snake-lowStairs-sts3215.json",
+    "mechanism": "snake",
+    "course": "lowStairs",
+    "motor": "sts3215",
+    "torqueCapNm": 2.942,
+    "baseline": {
+      "fitness": -2.2,
+      "progressM": -1,
+      "feasible": false
+    },
+    "tuned": {
+      "fitness": 0.1937,
+      "progressM": 1.3937,
+      "feasible": false
+    }
+  },
+  {
+    "file": "snake-stairs-sts3215.json",
+    "mechanism": "snake",
+    "course": "stairs",
+    "motor": "sts3215",
+    "torqueCapNm": 2.942,
+    "baseline": {
+      "fitness": -2.2,
+      "progressM": -1,
+      "feasible": false
+    },
+    "tuned": {
+      "fitness": 0.3206,
+      "progressM": 1.5206,
+      "feasible": false
+    }
+  }
+]
