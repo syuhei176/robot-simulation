@@ -4,12 +4,14 @@ import { snakeMechanism } from './snake.ts';
 import { quadMechanism } from './quad.ts';
 import { multipedMechanism } from './multiped.ts';
 import { urchinMechanism } from './urchin.ts';
+import { spokeUrchinMechanism } from './spoke-urchin.ts';
 
 export const MECHANISMS: Mechanism[] = [
   snakeMechanism,
   quadMechanism,
   multipedMechanism,
   urchinMechanism,
+  spokeUrchinMechanism,
 ];
 
 export function getMechanism(id: string): Mechanism {
