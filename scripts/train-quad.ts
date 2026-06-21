@@ -1,26 +1,29 @@
 /// <reference types="node" />
 /**
- * 3D 四足の end-to-end 強化学習（Mac / Node オフライン）。
+ * 3D 四足の強化学習（Mac / Node オフライン）。
  *   実行例:
- *     node scripts/train-quad.ts --iters 80 --motor scs0009 --mass 0.15
- *     node scripts/train-quad.ts --iters 150 --rollout 4096 --episode-steps 240
+ *     node scripts/train-quad.ts --iters 50 --base-tuned auto       # 残差RL on CMA-ES tuned 土台（推奨）
+ *     node scripts/train-quad.ts --iters 80                         # 残差RL on 参照歩容
+ *     node scripts/train-quad.ts --iters 80 --base-gait false       # end-to-end（静止姿勢中心・比較用）
  *
- * `QuadEnv`（方策が 8 関節目標角を直接出力）を `Policy`+`PPO`（TF.js, CPU）で学習する。
- * 重い探索は CLI 側で回し、学習した方策の重み＋メタを `public/policies/quad-<course>-<motor>.json` に保存する。
- * 既定は 150g・SCS0009 の小型四足を平地で歩かせるタスク（CMA-ES の静的歩容に対し、状態依存方策を学ぶ）。
+ * `QuadEnv`（方策が 8 関節を制御）を `Policy`+`PPO`（TF.js, CPU）で学習する。既定は **残差RL**＝IK クロール
+ * 歩容に方策の補正を上乗せ（`--base-tuned auto` で CMA-ES の速い tuned 歩容を土台にできる）。重い探索は
+ * CLI 側で回し、学習した方策の重み＋メタを `public/policies/quad-<course>-<motor>.json` に保存する。
+ * 既定は 150g・SCS0009 の小型四足を平地で歩かせるタスク。
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as tf from '@tensorflow/tfjs';
 import { COURSES, type CourseId } from '../src/sim3d/course.ts';
 import { getServo } from '../src/sim3d/servos.ts';
-import { QuadEnv, DEFAULT_QUAD_ENV } from '../src/env/QuadEnv.ts';
+import { QuadEnv, DEFAULT_QUAD_ENV, type QuadEnvConfig } from '../src/env/QuadEnv.ts';
 import { Policy } from '../src/rl/Policy.ts';
 import { PPO, DEFAULT_PPO } from '../src/rl/PPO.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = join(ROOT, 'public', 'policies');
+const TUNED_DIR = join(ROOT, 'public', 'tuned');
 
 interface Options {
   iters: number;
@@ -33,6 +36,8 @@ interface Options {
   lr: number;
   entCoef: number; // PPO エントロピー係数（下げると平均方策がコミットして決定論再生が安定）
   evalEvery: number; // 何イテレーションごとに決定論評価してベスト方策を更新するか
+  baseGait: boolean; // 残差RL（土台 IK 歩容に上乗せ）か、end-to-end（静止姿勢中心）か
+  baseTuned: string | null; // 土台に使う tuned 歩容 JSON（'auto'=public/tuned/quad-<course>-<motor>.json）
 }
 
 function parseArgs(argv: string[]): Options {
@@ -47,6 +52,8 @@ function parseArgs(argv: string[]): Options {
     lr: DEFAULT_PPO.lr,
     entCoef: DEFAULT_PPO.entCoef,
     evalEvery: 5,
+    baseGait: true,
+    baseTuned: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -85,6 +92,12 @@ function parseArgs(argv: string[]): Options {
       case 'eval-every':
         opts.evalEvery = Number(val);
         break;
+      case 'base-gait':
+        opts.baseGait = val !== 'false' && val !== '0';
+        break;
+      case 'base-tuned':
+        opts.baseTuned = val;
+        break;
       default:
         throw new Error(`未知のオプション --${key}`);
     }
@@ -120,6 +133,26 @@ async function main(): Promise<void> {
   const cap = servo.stallNm;
   const course = COURSES[opts.course]();
 
+  // 残差RL の土台に tuned 歩容を使う場合は CMA-ES の結果から歩容パラメータを読む。
+  let gaitParams: QuadEnvConfig['gaitParams'];
+  let baseLabel = '参照歩容';
+  if (opts.baseTuned) {
+    const file =
+      opts.baseTuned === 'auto'
+        ? join(TUNED_DIR, `quad-${opts.course}-${servo.id}.json`)
+        : opts.baseTuned;
+    const rec = JSON.parse(readFileSync(file, 'utf8')) as { params: Record<string, number> };
+    const p = rec.params;
+    gaitParams = {
+      period: p.period,
+      strideM: p.strideM,
+      liftM: p.liftM,
+      standM: p.standM,
+      stanceDuty: p.stanceDuty,
+    };
+    baseLabel = `tuned歩容(${file.split('/').pop()})`;
+  }
+
   await tf.setBackend('cpu');
   await tf.ready();
 
@@ -128,6 +161,8 @@ async function main(): Promise<void> {
     torqueCapNm: cap,
     course,
     episodeSteps: opts.episodeSteps,
+    baseGait: opts.baseGait,
+    gaitParams,
   });
   const policy = new Policy(env.obsDim, env.actDim, opts.hidden);
   const ppo = new PPO(policy, {
@@ -141,6 +176,9 @@ async function main(): Promise<void> {
 
   console.log(
     `=== 3D 四足 RL (PPO) === コース=${opts.course} / モーター=${servo.name} (cap ${cap.toFixed(3)} N·m) / 質量=${opts.mass}kg`,
+  );
+  console.log(
+    `  方策=${opts.baseGait ? `残差RL（土台=${baseLabel}）` : 'end-to-end（静止姿勢中心）'}`,
   );
   console.log(
     `  obsDim=${env.obsDim} actDim=${env.actDim} hidden=${opts.hidden} / rollout=${opts.rollout} episodeSteps=${opts.episodeSteps} / tf=${tf.getBackend()}`,
@@ -206,6 +244,9 @@ async function main(): Promise<void> {
     obsDim: env.obsDim,
     actDim: env.actDim,
     hidden: opts.hidden,
+    baseGait: opts.baseGait,
+    base: opts.baseGait ? baseLabel : 'stance',
+    gaitParams,
     env: {
       episodeSteps: opts.episodeSteps,
       controlFrames: DEFAULT_QUAD_ENV.controlFrames,
