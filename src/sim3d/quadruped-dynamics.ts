@@ -71,6 +71,65 @@ export const DEFAULT_QUAD_DYN_CONFIG: QuadDynConfig = {
   gait: { period: 1.2, strideM: 0.05, liftM: 0.03, standM: 0.165, stanceDuty: 0.75 },
 };
 
+/** スケール基準（s=1 になる総質量）= 基準機体 1.2kg。 */
+export const BASE_TOTAL =
+  DEFAULT_QUAD_DYN_CONFIG.trunk.mass + 8 * DEFAULT_QUAD_DYN_CONFIG.leg.segMass;
+
+/** 総質量から幾何スケール s（密度一定の相似縮小: mass ∝ s³）。s=1 で基準機体。 */
+export function bodyScale(mass: number): number {
+  return Math.cbrt(mass / BASE_TOTAL);
+}
+
+/**
+ * 機体スケール s に連動した「胴・脚・PD・横安定化・substeps」の override を返す（歩容は含めない）。
+ * quad.ts（IK 歩容）と QuadEnv（end-to-end RL）が同じ機体スケーリングを共有するための単一ソース。
+ * 幾何・質量 ∝ s³、PD ∝ s⁵（k∝I で ω=√(k/I) 一定＝陽解法の安定余裕がスケール不変）、横安定化 ∝ s⁴、
+ * substeps ∝ 1/s（軽い機体ほど陽解法に細かい刻みが要る）。s=1 で全係数 1＝基準機体に一致。
+ */
+export function scaledBodyOverrides(mass: number, torqueCapNm: number): QuadDynOverrides {
+  const D = DEFAULT_QUAD_DYN_CONFIG;
+  const s = bodyScale(mass);
+  const s3 = s * s * s;
+  const s4 = s3 * s;
+  const s5 = s4 * s;
+  return {
+    substeps: clamp(Math.round(D.substeps / s), D.substeps, 24),
+    trunk: {
+      length: D.trunk.length * s,
+      width: D.trunk.width * s,
+      height: D.trunk.height * s,
+      mass: D.trunk.mass * s3,
+    },
+    leg: {
+      thigh: D.leg.thigh * s,
+      shin: D.leg.shin * s,
+      segMass: D.leg.segMass * s3,
+      radius: D.leg.radius * s,
+    },
+    hipInset: D.hipInset * s,
+    motor: {
+      stiffness: D.motor.stiffness * s5,
+      damping: D.motor.damping * s5,
+      passiveDamping: D.motor.passiveDamping * s5,
+      maxTorqueNm: torqueCapNm,
+    },
+    lateralStabK: D.lateralStabK * s4,
+    lateralStabD: D.lateralStabD * s4,
+  };
+}
+
+/** overrides を DEFAULT_QUAD_DYN_CONFIG にマージして完全な config を作る（runQuadrupedGait / QuadSim 共用）。 */
+export function resolveConfig(overrides: QuadDynOverrides = {}): QuadDynConfig {
+  return {
+    ...DEFAULT_QUAD_DYN_CONFIG,
+    ...overrides,
+    trunk: { ...DEFAULT_QUAD_DYN_CONFIG.trunk, ...overrides.trunk },
+    leg: { ...DEFAULT_QUAD_DYN_CONFIG.leg, ...overrides.leg },
+    motor: { ...DEFAULT_QUAD_DYN_CONFIG.motor, ...overrides.motor },
+    gait: { ...DEFAULT_QUAD_DYN_CONFIG.gait, ...overrides.gait },
+  };
+}
+
 export interface QuadBodyLayout {
   kind: 'trunk' | 'thigh' | 'shin';
   half: [number, number, number]; // 箱の半寸法 [hx, hy, hz]
@@ -112,25 +171,25 @@ export interface QuadDynReplay {
 }
 
 // クロール: 4脚を1/4周期ずつずらし、1脚ずつ振る（常時3脚支持＝静的安定）
-const LEGS = [
+export const LEGS = [
   { name: 'FL', sx: +1, sy: +1, phase: 0 },
   { name: 'RR', sx: -1, sy: -1, phase: 0.25 },
   { name: 'FR', sx: +1, sy: -1, phase: 0.5 },
   { name: 'RL', sx: -1, sy: +1, phase: 0.75 },
 ] as const;
 
-const DEG = Math.PI / 180;
+export const DEG = Math.PI / 180;
 // configureMotorPosition の角度符号（pitchAboutY 規約に対する内蔵モーターの向き）
-const MOTOR_AXIS_SIGN = -1;
+export const MOTOR_AXIS_SIGN = -1;
 // 2リンク IK の肘の向き（膝が前/後ろどちらに曲がるか）。歩行方向が正になるよう選ぶ。
-const KNEE_SIGN = 1;
+export const KNEE_SIGN = 1;
 
 function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
 }
 
 /** 剛体の局所 z 軸が矢状面(x-z)でどれだけ傾いているか（鉛直=0, 前傾で正）。 */
-function pitchAboutY(body: RigidBody): number {
+export function pitchAboutY(body: RigidBody): number {
   const q = body.rotation();
   // localZ=(0,0,1) を q で回した world 方向
   const x = 2 * (q.x * q.z + q.w * q.y);
@@ -143,7 +202,7 @@ function pitchAboutY(body: RigidBody): number {
  * 脚は pitch(y) のみで横を制御できないため、横バランスは別機構前提というモデリング。矢状面(pitch)の
  * 歩行・推進はこの安定化では駆動されない（=サーボのトルク充足が前進可否を決める）。
  */
-function stabilizeLateral(trunk: RigidBody, k: number, d: number, physicsDt: number): void {
+export function stabilizeLateral(trunk: RigidBody, k: number, d: number, physicsDt: number): void {
   if (k <= 0 && d <= 0) return;
   const q = trunk.rotation();
   // up = local z を world へ。lateral lean(ロール) ≈ up の y 成分。
@@ -160,13 +219,13 @@ function stabilizeLateral(trunk: RigidBody, k: number, d: number, physicsDt: num
 }
 
 /** 胴の上軸(local z)が world 上(z)からどれだけ傾いたか [rad]。 */
-function tiltFromUp(body: RigidBody): number {
+export function tiltFromUp(body: RigidBody): number {
   const q = body.rotation();
   const upZ = 1 - 2 * (q.x * q.x + q.y * q.y); // world z 成分
   return Math.acos(clamp(upZ, -1, 1));
 }
 
-interface Leg {
+export interface Leg {
   thigh: RigidBody;
   shin: RigidBody;
   hipJoint: RevoluteImpulseJoint;
@@ -175,13 +234,13 @@ interface Leg {
   hipX: number; // 胴フレームでの hip の前後位置（足先の世界 x→地形高さ参照に使う）
 }
 
-interface QuadAssembly {
+export interface QuadAssembly {
   trunk: RigidBody;
   legs: Leg[];
   bodies: RigidBody[]; // 記録順: trunk, (thigh,shin)×4
 }
 
-function buildQuad(world: World, cfg: QuadDynConfig): QuadAssembly {
+export function buildQuad(world: World, cfg: QuadDynConfig): QuadAssembly {
   const { trunk: T, leg: L } = cfg;
   const standZ = T.height / 2 + L.thigh + L.shin + 0.002; // 足先がほぼ z=0
   const r = L.radius;
@@ -283,7 +342,7 @@ function smoothstep(u: number): number {
  * 胴を前進させる。遊脚は後→前へ戻しつつ放物線で持ち上げる。常時3脚接地（stanceDuty）。
  * 返り値: fx=前後, fz=上下（足は hip より下なので負）。
  */
-function footTargetRelHip(
+export function footTargetRelHip(
   cfg: QuadDynConfig,
   t: number,
   phase: number,
@@ -305,7 +364,7 @@ function footTargetRelHip(
  * 2リンク平面 IK。hip 基準の足先目標 (fx, fz)（fz<0）を thigh/shin の world pitch (p1,p2) に。
  * リンクの hip→distal 方向は pitchAboutY=p に対して (-sin p, -cos p)。kneeSign で肘の向きを選ぶ。
  */
-function legIK(
+export function legIK(
   fx: number,
   fz: number,
   l1: number,
@@ -366,7 +425,7 @@ function gaitTargets(
  * - mode='position'（旧式・比較用）: 内蔵位置モーターで目標角を詰めて出力を ±cap に頭打ち。
  *   中間トルク帯で cap→前進距離 が非単調になる。
  */
-function driveJoint(
+export function driveJoint(
   joint: RevoluteImpulseJoint,
   parent: RigidBody,
   child: RigidBody,
@@ -404,7 +463,7 @@ function driveJoint(
   return { demand: Math.abs(raw), applied: Math.abs(active) };
 }
 
-function layoutOf(cfg: QuadDynConfig): QuadBodyLayout[] {
+export function layoutOf(cfg: QuadDynConfig): QuadBodyLayout[] {
   const { trunk: T, leg: L } = cfg;
   const layout: QuadBodyLayout[] = [
     { kind: 'trunk', half: [T.length / 2, T.width / 2, T.height / 2] },
@@ -416,7 +475,7 @@ function layoutOf(cfg: QuadDynConfig): QuadBodyLayout[] {
   return layout;
 }
 
-function captureFrame(asm: QuadAssembly, t: number, diag: QuadFrameDiag): QuadFrame {
+export function captureFrame(asm: QuadAssembly, t: number, diag: QuadFrameDiag): QuadFrame {
   return {
     t,
     bodies: asm.bodies.map((b) => {
@@ -450,14 +509,7 @@ export async function runQuadrupedGait(
   recordFps = 60,
 ): Promise<QuadDynReplay> {
   await RAPIER.init();
-  const cfg: QuadDynConfig = {
-    ...DEFAULT_QUAD_DYN_CONFIG,
-    ...overrides,
-    trunk: { ...DEFAULT_QUAD_DYN_CONFIG.trunk, ...overrides.trunk },
-    leg: { ...DEFAULT_QUAD_DYN_CONFIG.leg, ...overrides.leg },
-    motor: { ...DEFAULT_QUAD_DYN_CONFIG.motor, ...overrides.motor },
-    gait: { ...DEFAULT_QUAD_DYN_CONFIG.gait, ...overrides.gait },
-  };
+  const cfg = resolveConfig(overrides);
 
   const substeps = Math.max(1, Math.round(cfg.substeps));
   const physicsDt = cfg.dt / substeps;

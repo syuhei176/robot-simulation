@@ -91,6 +91,26 @@ export class Policy {
     });
   }
 
+  /** Node 用: 重みを素の配列で取り出す（ファイル保存用。localStorage を使わない）。 */
+  exportWeights(): { policy: number[][]; value: number[][]; logStd: number[] } {
+    const dump = (net: tf.Sequential): number[][] =>
+      net.getWeights().map((w) => Array.from(w.dataSync() as Float32Array));
+    return {
+      policy: dump(this.policyNet),
+      value: dump(this.valueNet),
+      logStd: Array.from(this.logStd.dataSync()),
+    };
+  }
+
+  /** exportWeights の逆。同一構成（obsDim/actDim/hidden）の Policy へ重みを流し込む。 */
+  importWeights(data: { policy: number[][]; value: number[][]; logStd: number[] }): void {
+    const apply = (net: tf.Sequential, arrs: number[][]): void =>
+      net.setWeights(net.getWeights().map((w, i) => tf.tensor(arrs[i], w.shape)));
+    apply(this.policyNet, data.policy);
+    apply(this.valueNet, data.value);
+    this.logStd.assign(tf.tensor1d(data.logStd));
+  }
+
   async save(key: string): Promise<void> {
     await this.policyNet.save(`localstorage://${key}-policy`);
     await this.valueNet.save(`localstorage://${key}-value`);

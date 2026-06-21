@@ -87,6 +87,11 @@ export class MicrobotEnv {
     return this.cfg.controlSubsteps * this.sim.dt;
   }
 
+  /** RLEnv 契約: 進捗指標 = COM の前進 x [m]。 */
+  progressMetric(): number {
+    return this.physics.centerOfMass()[0];
+  }
+
   reset(): Float32Array {
     this.physics.reset();
     // 初期位相は決定論的に 0。ランダム化すると対称な初期状態から進行方向(+x/-x)が

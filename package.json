@@ -19,7 +19,8 @@
     "type-check": "tsc --noEmit",
     "quality-check": "pnpm lint && pnpm format:check && pnpm type-check",
     "quadruped": "node scripts/quadruped.ts",
-    "optimize-gait": "node scripts/optimize-gait.ts"
+    "optimize-gait": "node scripts/optimize-gait.ts",
+    "train-quad": "node scripts/train-quad.ts"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.19.3",

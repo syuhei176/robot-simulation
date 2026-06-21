@@ -1,6 +1,6 @@
 import * as tf from '@tensorflow/tfjs';
 import { Policy } from './Policy.ts';
-import type { MicrobotEnv } from '../env/MicrobotEnv.ts';
+import type { RLEnv } from './RLEnv.ts';
 
 export interface PPOConfig {
   rolloutSteps: number;
@@ -58,7 +58,7 @@ export class PPO {
   }
 
   /** 1 イテレーション: ロールアウト収集 → GAE → PPO 更新。 */
-  runIteration(env: MicrobotEnv): IterationStats {
+  runIteration(env: RLEnv): IterationStats {
     const T = this.cfg.rolloutSteps;
     const obsBuf: number[][] = [];
     const actBuf: number[][] = [];
@@ -73,7 +73,7 @@ export class PPO {
     if (!this.curObs) {
       this.curObs = env.reset();
       this.epReturn = 0;
-      this.epStartX = env.physics.centerOfMass()[0];
+      this.epStartX = env.progressMetric();
     }
 
     // --- ロールアウト収集 ---
@@ -94,10 +94,10 @@ export class PPO {
 
       if (done) {
         episodeReturns.push(this.epReturn);
-        episodeForwards.push(env.physics.centerOfMass()[0] - this.epStartX);
+        episodeForwards.push(env.progressMetric() - this.epStartX);
         this.curObs = env.reset();
         this.epReturn = 0;
-        this.epStartX = env.physics.centerOfMass()[0];
+        this.epStartX = env.progressMetric();
       }
     }
 

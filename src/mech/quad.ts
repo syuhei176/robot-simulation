@@ -9,6 +9,8 @@
 import {
   runQuadrupedGait,
   DEFAULT_QUAD_DYN_CONFIG,
+  bodyScale,
+  scaledBodyOverrides,
   type QuadDynReplay,
 } from '../sim3d/quadruped-dynamics.ts';
 import type { CourseSpec } from '../sim3d/course.ts';
@@ -16,17 +18,10 @@ import type { StairDynamicsView } from '../render/StairDynamicsView.ts';
 import type { Mechanism, MechReplay, MechRunCtx, MechScore, StatRow } from './Mechanism.ts';
 
 const D = DEFAULT_QUAD_DYN_CONFIG;
-const BASE_TRUNK = D.trunk.mass;
-const BASE_SEG = D.leg.segMass;
-// スケール基準（s=1 になる質量）。この機体が「基準機体」で、歩容スライダーもこの機体の単位で表す。
-const BASE_TOTAL = BASE_TRUNK + 8 * BASE_SEG; // 1.2kg
+// スケール基準（s=1 になる質量）= 基準機体 1.2kg。歩容スライダーもこの基準機体の単位で表す。
 const G = D.gait;
 // ダッシュボード/最適化の既定機体は SCS0009 級の小型四足（150g）。s=(0.15/1.2)^(1/3)=0.5。
 const DEFAULT_MASS = 0.15;
-
-function clamp(x: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, x));
-}
 
 class QuadReplay implements MechReplay {
   readonly duration: number;
@@ -189,15 +184,10 @@ export const quadMechanism: Mechanism = {
     { key: 'stanceDuty', label: '接地比', min: 0.5, max: 0.9, step: 0.05, default: G.stanceDuty },
   ],
   async run(ctx: MechRunCtx): Promise<MechReplay> {
-    // 機体スケール s（密度一定の相似縮小: mass ∝ s³）。s=1 で基準機体（回帰）。
-    const s = Math.cbrt(ctx.params.mass / BASE_TOTAL);
-    const s3 = s * s * s; // 質量・慣性体積 ∝ s³
-    const s4 = s3 * s; // 重力トルク ∝ s⁴ → 横安定化ゲインを合わせる
-    const s5 = s4 * s; // 関節慣性 I ∝ s⁵。PD を k ∝ I にすると ω=√(k/I) 一定で陽解法の安定余裕が
-    //                    スケール不変になり、軽い機体でも飽和・発散しない（s⁴/s³ は発散する＝実測）。
+    // 機体スケール s（密度一定の相似縮小: mass ∝ s³）。胴・脚・PD・横安定化・substeps は共有関数で
+    // スケール（QuadEnv と同一ソース）。歩容スライダーだけは基準機体(1.2kg)の単位なのでここで s 連動させる。
+    const s = bodyScale(ctx.params.mass);
     const sqrtS = Math.sqrt(s); // 動的相似（Froude）: 時間 ∝ √s。歩容周期を縮めて前進を稼ぐ。
-    // 小さい機体ほど陽解法の安定化に substeps を要する（s=0.5→16, s=1→8）。
-    const substeps = clamp(Math.round(D.substeps / s), D.substeps, 24);
     // 地形のあるコースは端まで歩くのに時間が要るので、ゴールまでの距離に応じて duration を伸ばす
     // （平地は従来どおり既定 5s でトルク/前進を測る回帰互換）。
     const duration =
@@ -206,30 +196,9 @@ export const quadMechanism: Mechanism = {
         : D.duration;
     const replay = await runQuadrupedGait(
       {
+        ...scaledBodyOverrides(ctx.params.mass, ctx.torqueCapNm),
         course: ctx.course,
         duration,
-        substeps,
-        trunk: {
-          length: D.trunk.length * s,
-          width: D.trunk.width * s,
-          height: D.trunk.height * s,
-          mass: D.trunk.mass * s3,
-        },
-        leg: {
-          thigh: D.leg.thigh * s,
-          shin: D.leg.shin * s,
-          segMass: D.leg.segMass * s3,
-          radius: D.leg.radius * s,
-        },
-        hipInset: D.hipInset * s,
-        motor: {
-          stiffness: D.motor.stiffness * s5,
-          damping: D.motor.damping * s5,
-          passiveDamping: D.motor.passiveDamping * s5,
-          maxTorqueNm: ctx.torqueCapNm,
-        },
-        lateralStabK: D.lateralStabK * s4,
-        lateralStabD: D.lateralStabD * s4,
         // 歩容スライダーは基準機体(1.2kg)の単位。機体スケール s で幾何相似に縮める（長さ ∝ s, 周期 ∝ √s）。
         gait: {
           period: ctx.params.period * sqrtS,
