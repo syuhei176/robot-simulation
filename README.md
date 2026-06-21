@@ -41,6 +41,17 @@
   TF.js 無しで再生**できる。`pnpm train-quad --base-tuned auto`（end-to-end 比較は `--base-gait false`）
   - 実績: 平地 小型四足×SCS0009 = 決定論 54cm/200step、合成コース 大型四足×STS3215（地形適応）= 障害物＋
     階段3段を登り**踊り場まで全走破 241cm/1800step**（転倒なし）。ダッシュボードの RL ボタンで再生できる。
+- **多足（クモ/ウニ）機構 — 安サーボで合成コース走破** — 「**SCS0009（~700円）+ 軽量の足で合成コースを
+  走破できる機構は何か**」を形態探索（`pnpm morph-sweep`）。N脚に一般化した動的歩行（`makeLegs(rows)`）で
+  脚数×脚長を振り、各形態を **SCS0009 cap=0.226 と 実質無限 cap で比較**して「安サーボが真に足りるか」を判定した。
+  結論: **トルクは軽量機体では律速でない**（150g 機体で τ余裕 2〜4倍・飽和ゼロ）。機体を縮小すると逆に
+  絶対 2.5cm の障害物が相対的に巨大化して四足は 18cm で停滞する。走破の鍵は **軽い胴(≲300g)＋障害物より
+  長い脚(12〜15cm)＋多脚 tripod(6〜8本)** ＝「**胴の小さいクモ/ウニ(daddy-long-legs)**」型。
+  旗艦 = 六足 tripod・脚15cm・215〜257g・SCS0009 で **合成コースを踊り場まで全走破(~284cm)**（飽和ゼロ・
+  ピーク要求は整定の一過性）。「安いモーターでどこまで」の答えは、軽量多足では**最安の SG90(¥300) でも走破**
+  （トルクは律速にならない）＝ SCS0009 を推す理由はトルクでなく **位置帰還（12関節の協調制御に必須）**。
+  ダッシュボードに `機構: 多足（クモ/ウニ）` を追加（脚数/脚長/歩容スライダー）。詳細は
+  [`docs/snake-stair-sizing.md`](docs/snake-stair-sizing.md) §6.13。
 
 ## 動かす
 
@@ -68,6 +79,7 @@ pnpm dev          # http://localhost:5173
 ```bash
 pnpm motor-sizing   # 形状→モーター逆算＋機構×モーター比較＋軽量化スイープ
 pnpm quadruped      # 四足 3D 動的歩行レポート＋静的サーボ選定スイープ
+pnpm morph-sweep    # 形態探索: SCS0009+軽量脚で合成コースを走破できる機構（脚数×脚長×cap感度）
 pnpm stair-dynamics # 階段の Rapier 動的プローブ＋完全 physical attempt 診断
 pnpm optimize-gait  # 歩容を CMA-ES でオフライン最適化 → public/tuned/*.json（--mech/--course/--motor/--gens/--seed）
 pnpm train-quad --base-tuned auto  # 3D 四足を残差RL(PPO)で学習 → public/policies/*.json（--iters/--rollout/--base-gait）
@@ -100,7 +112,8 @@ pnpm quality-check  # lint + format:check + type-check
 
 統合ダッシュボードと歩容最適化:
 
-- [`src/mech/`](src/mech/) … 機構抽象。`Mechanism`（蛇/四足の `run` と `score`）＋ `registry`。新機構はここに1つ足すだけ。
+- [`src/mech/`](src/mech/) … 機構抽象。`Mechanism`（蛇/四足/多足の `run` と `score`）＋ `registry`。新機構はここに1つ足すだけ。
+  多足（クモ/ウニ）は [`multiped.ts`](src/mech/multiped.ts)（N脚一般化した `runQuadrupedGait` を流用）。
 - [`dashboard.ts`](src/dashboard.ts) … 機構 × コース × モーター × 歩容 を1画面で切替＋ scripted/tuned 再生（`index.html`）。
 - [`scripts/optimize-gait.ts`](scripts/optimize-gait.ts) … CMA-ES（Jacobi 固有値分解つき・seed 再現可）で歩容をオフライン最適化。
 - [`scripts/train-quad.ts`](scripts/train-quad.ts) … 3D 四足の end-to-end RL（PPO）をオフライン学習し方策を `public/policies/` に保存。

@@ -51,6 +51,8 @@ export interface QuadDynConfig {
     standM: number; // hip から足先までの保持高さ [m]（< thigh+shin で膝を曲げる）
     stanceDuty: number; // 接地が占める周期割合（残りが遊脚）。0.75=常時3脚接地
   };
+  // 脚レイアウト（配置＋歩容位相）。未指定は四足 LEGS。多足は makeLegs(rows, gait) で生成する。
+  legs?: LegSpec[];
 }
 
 export const DEFAULT_QUAD_DYN_CONFIG: QuadDynConfig = {
@@ -170,13 +172,47 @@ export interface QuadDynReplay {
   summary: QuadDynSummary;
 }
 
+/**
+ * 1脚の配置と歩容位相。sx は胴フレームでの前後位置の係数 [-1,+1]（+1=最前, -1=最後尾。
+ * 4脚は±1 のみだが、多足では中間行が連続値を取る）。sy は左右（±1）。phase は遊脚タイミング。
+ */
+export interface LegSpec {
+  name: string;
+  sx: number;
+  sy: number;
+  phase: number;
+}
+
 // クロール: 4脚を1/4周期ずつずらし、1脚ずつ振る（常時3脚支持＝静的安定）
-export const LEGS = [
+export const LEGS: LegSpec[] = [
   { name: 'FL', sx: +1, sy: +1, phase: 0 },
   { name: 'RR', sx: -1, sy: -1, phase: 0.25 },
   { name: 'FR', sx: +1, sy: -1, phase: 0.5 },
   { name: 'RL', sx: -1, sy: +1, phase: 0.75 },
-] as const;
+];
+
+/**
+ * 多足（N行×左右）の脚レイアウトを生成する。rows=2 で四足相当（ただし歩容位相は下記方式）。
+ * - gait='tripod': 隣り合う脚を逆位相(0/0.5)の2群に分ける交互三脚歩容（常に約半数が接地＝静的安定）。
+ *   6脚以上で安定。市松模様 (row+side) パリティで群分けする。
+ * - gait='wave': 後ろから前へ1脚ずつ遊脚する波状歩容（最も静的に安定だが遅い）。
+ * rows 行は胴の前後に等間隔(+1..-1)で配置する。
+ */
+export function makeLegs(rows: number, gait: 'tripod' | 'wave' = 'tripod'): LegSpec[] {
+  const legs: LegSpec[] = [];
+  const total = rows * 2;
+  let waveIdx = 0;
+  for (let r = 0; r < rows; r++) {
+    const sx = rows > 1 ? 1 - (2 * r) / (rows - 1) : 0; // 前(+1)→後(-1)
+    for (const sy of [+1, -1] as const) {
+      const sideIdx = sy === +1 ? 0 : 1;
+      const phase = gait === 'tripod' ? ((r + sideIdx) % 2) * 0.5 : waveIdx++ / total;
+      const side = sy === +1 ? 'L' : 'R';
+      legs.push({ name: `${r}${side}`, sx, sy, phase });
+    }
+  }
+  return legs;
+}
 
 export const DEG = Math.PI / 180;
 // configureMotorPosition の角度符号（pitchAboutY 規約に対する内蔵モーターの向き）
@@ -263,7 +299,7 @@ export function buildQuad(world: World, cfg: QuadDynConfig): QuadAssembly {
   const legs: Leg[] = [];
   const bodies: RigidBody[] = [trunk];
 
-  for (const spec of LEGS) {
+  for (const spec of cfg.legs ?? LEGS) {
     const hipX = spec.sx * (T.length / 2 - cfg.hipInset);
     const hipY = spec.sy * (T.width / 2);
     const hipZ = standZ - T.height / 2;
@@ -468,7 +504,7 @@ export function layoutOf(cfg: QuadDynConfig): QuadBodyLayout[] {
   const layout: QuadBodyLayout[] = [
     { kind: 'trunk', half: [T.length / 2, T.width / 2, T.height / 2] },
   ];
-  for (let i = 0; i < LEGS.length; i++) {
+  for (let i = 0; i < (cfg.legs ?? LEGS).length; i++) {
     layout.push({ kind: 'thigh', half: [L.radius, L.radius, L.thigh / 2] });
     layout.push({ kind: 'shin', half: [L.radius, L.radius, L.shin / 2] });
   }
@@ -500,6 +536,8 @@ export interface QuadDynOverrides {
   duration?: number;
   lateralStabK?: number;
   lateralStabD?: number;
+  /** 脚レイアウト（多足対応）。未指定は四足 LEGS。 */
+  legs?: LegSpec[];
   /** 走行コース（地形）。未指定は平地。地形適応歩容が足先を terrainTopAt に合わせる。 */
   course?: CourseSpec;
 }

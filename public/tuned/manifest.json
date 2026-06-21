@@ -1,5 +1,22 @@
 [
   {
+    "file": "multiped-combined-scs0009.json",
+    "mechanism": "multiped",
+    "course": "combined",
+    "motor": "scs0009",
+    "torqueCapNm": 0.2256,
+    "baseline": {
+      "fitness": 2.29,
+      "progressM": 2.29,
+      "feasible": true
+    },
+    "tuned": {
+      "fitness": 2.29,
+      "progressM": 2.29,
+      "feasible": true
+    }
+  },
+  {
     "file": "quad-combined-sts3215.json",
     "mechanism": "quad",
     "course": "combined",

@@ -19,6 +19,7 @@
     "type-check": "tsc --noEmit",
     "quality-check": "pnpm lint && pnpm format:check && pnpm type-check",
     "quadruped": "node scripts/quadruped.ts",
+    "morph-sweep": "node scripts/morph-sweep.ts",
     "optimize-gait": "node scripts/optimize-gait.ts",
     "train-quad": "node scripts/train-quad.ts"
   },
