@@ -511,7 +511,11 @@ export function layoutOf(cfg: QuadDynConfig): QuadBodyLayout[] {
   return layout;
 }
 
-export function captureFrame(asm: QuadAssembly, t: number, diag: QuadFrameDiag): QuadFrame {
+export function captureFrame(
+  asm: { bodies: RigidBody[] },
+  t: number,
+  diag: QuadFrameDiag,
+): QuadFrame {
   return {
     t,
     bodies: asm.bodies.map((b) => {

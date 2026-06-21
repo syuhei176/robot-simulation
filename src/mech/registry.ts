@@ -3,8 +3,14 @@ import type { Mechanism } from './Mechanism.ts';
 import { snakeMechanism } from './snake.ts';
 import { quadMechanism } from './quad.ts';
 import { multipedMechanism } from './multiped.ts';
+import { urchinMechanism } from './urchin.ts';
 
-export const MECHANISMS: Mechanism[] = [snakeMechanism, quadMechanism, multipedMechanism];
+export const MECHANISMS: Mechanism[] = [
+  snakeMechanism,
+  quadMechanism,
+  multipedMechanism,
+  urchinMechanism,
+];
 
 export function getMechanism(id: string): Mechanism {
   const mech = MECHANISMS.find((m) => m.id === id);
