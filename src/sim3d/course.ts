@@ -208,6 +208,92 @@ function bumpsCourse(
   };
 }
 
+/**
+ * 合成コース — 1つの地形に「平地 → 小障害物 → 平地 → 階段 → 上の踊り場」を直列に並べたもの。
+ * 「共通Mapを共通の機構/スクリプトで走破する」ための統合コース。蛇は輪郭追従でそのまま走り、
+ * 四足は地形適応歩容（足先を `terrainTopAt` に合わせる）で走る。地形は登りのみ（深い谷を作らない）
+ * ので四足の IK リーチ内に収まり、最終到達点（階段上）が最高点なので既存の走破判定に乗る。
+ */
+function combinedCourse(): CourseSpec {
+  const friction = 0.9;
+  // 障害物・段差とも四足の地形適応歩容が越えられる高さに抑える（急峻な高バンプ/高段は転倒する）。
+  const bumpH = 0.025;
+  const bumpHalfX = 0.08; // 幅広（16cm）で足が乗りやすい
+  const bumpXs = [0.3, 0.6];
+  const stairRise = 0.03; // 3cm（4cm 以上は四足が転倒）。踏面は広めで安定
+  const stairTread = 0.28;
+  const stairCount = 3;
+  const runupStartX = -1.0;
+  const stairStartX = 0.95; // 障害物の先の平地を越えてから階段
+  const stairTopX = stairStartX + stairCount * stairTread; // 1.79
+  const topZ = stairCount * stairRise; // 0.09
+  // 上の踊り場は長め（四足が duration 内に端から落ちないよう。報酬は goalX で頭打ちなので走り得しない）。
+  const goalEndX = stairTopX + 2.2;
+
+  const boxes: CourseBox[] = [];
+  // 平地＋障害物区間の連続した床（z<0、x: runup→階段手前）。
+  boxes.push({
+    cx: (runupStartX + stairStartX) / 2,
+    cz: -STAIR_BASE_HALF_Z,
+    halfX: (stairStartX - runupStartX) / 2,
+    halfZ: STAIR_BASE_HALF_Z,
+  });
+  // 小障害物。
+  for (const bx of bumpXs) {
+    boxes.push({ cx: bx, cz: bumpH / 2, halfX: bumpHalfX, halfZ: bumpH / 2 });
+  }
+  // 階段（各段 z=0 から (i+1)*rise まで）。
+  for (let i = 0; i < stairCount; i++) {
+    const height = (i + 1) * stairRise;
+    boxes.push({
+      cx: stairStartX + i * stairTread + stairTread / 2,
+      cz: height / 2,
+      halfX: stairTread / 2,
+      halfZ: height / 2,
+    });
+  }
+  // 上の踊り場。
+  boxes.push({
+    cx: (stairTopX + goalEndX) / 2,
+    cz: topZ / 2,
+    halfX: (goalEndX - stairTopX) / 2,
+    halfZ: topZ / 2,
+  });
+
+  // 輪郭ポリライン（x 単調増加）: 平地 → 各障害物の上下 → 平地 → 各段の蹴上げ/踏面 → 踊り場。
+  const profile: Array<[number, number]> = [
+    [runupStartX, 0],
+    [0, 0],
+  ];
+  for (const bx of bumpXs) {
+    profile.push(
+      [bx - bumpHalfX, 0],
+      [bx - bumpHalfX, bumpH],
+      [bx + bumpHalfX, bumpH],
+      [bx + bumpHalfX, 0],
+    );
+  }
+  profile.push([stairStartX, 0]);
+  for (let i = 0; i < stairCount; i++) {
+    const height = (i + 1) * stairRise;
+    profile.push([stairStartX + i * stairTread, height]); // 蹴上げ
+    profile.push([stairStartX + (i + 1) * stairTread, height]); // 踏面
+  }
+  profile.push([goalEndX, topZ]);
+
+  return {
+    id: 'combined',
+    name: '合成コース（障害物→階段）',
+    boxes,
+    profile,
+    plateauStartX: stairStartX + (stairCount - 1) * stairTread, // 最上段の蹴上げ（落とし所）
+    goalX: stairTopX, // 階段を登りきれば走破
+    stepRise: stairRise,
+    stepForward: 0.1,
+    defaultFriction: friction,
+  };
+}
+
 /** コースカタログ。引数で寸法を上書きできる。 */
 export const COURSES = {
   stairs: (params?: Partial<StairsParams>): CourseSpec => stairsCourse(params),
@@ -217,6 +303,7 @@ export const COURSES = {
     name: '低い階段 8cm×3',
   }),
   bumps: (): CourseSpec => bumpsCourse(),
+  combined: (): CourseSpec => combinedCourse(),
   flat: (): CourseSpec => flatCourse(),
 } as const;
 

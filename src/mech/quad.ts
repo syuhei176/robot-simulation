@@ -8,6 +8,7 @@ import {
   DEFAULT_QUAD_DYN_CONFIG,
   type QuadDynReplay,
 } from '../sim3d/quadruped-dynamics.ts';
+import type { CourseSpec } from '../sim3d/course.ts';
 import type { StairDynamicsView } from '../render/StairDynamicsView.ts';
 import type { Mechanism, MechReplay, MechRunCtx, MechScore, StatRow } from './Mechanism.ts';
 
@@ -21,17 +22,20 @@ class QuadReplay implements MechReplay {
   private readonly replay: QuadDynReplay;
   private readonly torqueCapNm: number;
   private readonly motorName: string;
+  private readonly course: CourseSpec;
   // パラメータプロパティは使わない（node の型ストリップ実行で未対応のため・明示フィールドにする）。
-  constructor(replay: QuadDynReplay, torqueCapNm: number, motorName: string) {
+  constructor(replay: QuadDynReplay, torqueCapNm: number, motorName: string, course: CourseSpec) {
     this.replay = replay;
     this.torqueCapNm = torqueCapNm;
     this.motorName = motorName;
+    this.course = course;
     this.duration = replay.summary.config.duration;
   }
 
   bindView(view: StairDynamicsView): void {
     view.setMechanism('quad');
     view.buildQuadReplay(this.replay.layout);
+    view.showCourse(this.course);
   }
 
   applyTime(view: StairDynamicsView, t: number): void {
@@ -82,7 +86,10 @@ class QuadReplay implements MechReplay {
     const s = this.replay.summary;
     // 目的: 転ばず・直立を保ったまま前進距離を最大化。転倒は強く減点（前へ滑り込んでも報われない）。
     // 過度な傾き(>25°)は微減点。トルク cap は sim 側で clamp 済み＝弱いモーターは自然に前進せず低 fitness。
-    const progressM = Number.isFinite(s.forwardDistanceM) ? s.forwardDistanceM : -1;
+    // 前進はコース goal（＋踊り場少し）で頭打ちにする: コース端の先（床のない void）へ飛んで距離を
+    // 稼ぐ報酬ハックを防ぐ。平地は goalX が遠く実質キャップなし＝従来の前進距離最大化と一致。
+    const raw = Number.isFinite(s.forwardDistanceM) ? s.forwardDistanceM : -1;
+    const progressM = Math.min(raw, this.course.goalX + 0.5);
     const tilt = Number.isFinite(s.maxTiltDeg) ? s.maxTiltDeg : 90;
     let fitness = progressM;
     if (s.fell) fitness -= 0.5;
@@ -117,8 +124,8 @@ class QuadReplay implements MechReplay {
 export const quadMechanism: Mechanism = {
   id: 'quad',
   name: '機構: 四足',
-  subtitle: 'Rapier 3D 動的歩行（クロール歩容）',
-  supportsCourse: false,
+  subtitle: 'Rapier 3D 動的歩行（地形適応クロール歩容）',
+  supportsCourse: true,
   params: [
     {
       key: 'mass',
@@ -144,7 +151,7 @@ export const quadMechanism: Mechanism = {
       key: 'strideM',
       label: 'ストライド',
       min: 0.02,
-      max: 0.1,
+      max: 0.12,
       step: 0.005,
       default: G.strideM,
       unit: 'm',
@@ -153,7 +160,7 @@ export const quadMechanism: Mechanism = {
       key: 'liftM',
       label: '遊脚持ち上げ',
       min: 0.01,
-      max: 0.06,
+      max: 0.1, // 段差・障害物を越えるには高く上げる必要があるため上限を拡張
       step: 0.005,
       default: G.liftM,
       unit: 'm',
@@ -171,8 +178,16 @@ export const quadMechanism: Mechanism = {
   ],
   async run(ctx: MechRunCtx): Promise<MechReplay> {
     const massFactor = ctx.params.mass / BASE_TOTAL;
+    // 地形のあるコースは端まで歩くのに時間が要るので、ゴールまでの距離に応じて duration を伸ばす
+    // （平地は従来どおり既定 5s でトルク/前進を測る回帰互換）。
+    const duration =
+      ctx.course.stepRise > 0
+        ? Math.min(32, Math.max(8, (ctx.course.goalX + 0.8) / 0.08 + 4))
+        : DEFAULT_QUAD_DYN_CONFIG.duration;
     const replay = await runQuadrupedGait(
       {
+        course: ctx.course,
+        duration,
         trunk: { mass: BASE_TRUNK * massFactor },
         leg: { segMass: BASE_SEG * massFactor },
         motor: { maxTorqueNm: ctx.torqueCapNm },
@@ -186,6 +201,6 @@ export const quadMechanism: Mechanism = {
       },
       60,
     );
-    return new QuadReplay(replay, ctx.torqueCapNm, ctx.motorName);
+    return new QuadReplay(replay, ctx.torqueCapNm, ctx.motorName, ctx.course);
   },
 };

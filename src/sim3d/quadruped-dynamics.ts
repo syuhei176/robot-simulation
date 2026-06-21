@@ -18,7 +18,7 @@ import RAPIER, {
   type World,
 } from '@dimforge/rapier3d-compat';
 import { G } from './chain.ts';
-import { COURSES, buildCourseColliders } from './course.ts';
+import { COURSES, buildCourseColliders, terrainTopAt, type CourseSpec } from './course.ts';
 
 export interface QuadDynConfig {
   trunk: { length: number; width: number; height: number; mass: number };
@@ -172,6 +172,7 @@ interface Leg {
   hipJoint: RevoluteImpulseJoint;
   kneeJoint: RevoluteImpulseJoint;
   phase: number;
+  hipX: number; // 胴フレームでの hip の前後位置（足先の世界 x→地形高さ参照に使う）
 }
 
 interface QuadAssembly {
@@ -262,7 +263,7 @@ function buildQuad(world: World, cfg: QuadDynConfig): QuadAssembly {
     kneeJoint.setContactsEnabled(false);
     kneeJoint.configureMotorModel(RAPIER.MotorModel.ForceBased);
 
-    legs.push({ thigh, shin, hipJoint, kneeJoint, phase: spec.phase });
+    legs.push({ thigh, shin, hipJoint, kneeJoint, phase: spec.phase, hipX });
     bodies.push(thigh, shin);
   }
 
@@ -336,13 +337,22 @@ function legIK(
  */
 function gaitTargets(
   cfg: QuadDynConfig,
+  course: CourseSpec,
   trunkPitch: number,
+  terrainBody: number,
+  trunkX: number,
+  hipX: number,
   bodyErrX: number,
   t: number,
   phase: number,
 ): { hip: number; knee: number } {
   const { fx, fz } = footTargetRelHip(cfg, t, phase);
-  const { p1, p2 } = legIK(fx + bodyErrX, fz, cfg.leg.thigh, cfg.leg.shin, KNEE_SIGN);
+  // 地形適応: 足先の世界 x の地形高さと「胴基準の地形高さ」の差ぶん、足先 z 目標をずらして地形に沿わせる。
+  // 胴は terrainBody（4 hip 直下地形の平均）の上 standM を保つ。平地では terrainTopAt が 0 で従来挙動と一致。
+  // 胴基準を中心1点でなく hip 平均にするのは、段の縁で基準が階段状にジャンプして胴が暴れるのを抑えるため。
+  const footWorldX = trunkX + hipX + fx + bodyErrX;
+  const terrainDz = terrainTopAt(course, footWorldX) - terrainBody;
+  const { p1, p2 } = legIK(fx + bodyErrX, fz + terrainDz, cfg.leg.thigh, cfg.leg.shin, KNEE_SIGN);
   return { hip: p1 - trunkPitch, knee: p2 - p1 };
 }
 
@@ -429,6 +439,8 @@ export interface QuadDynOverrides {
   dt?: number;
   substeps?: number;
   duration?: number;
+  /** 走行コース（地形）。未指定は平地。地形適応歩容が足先を terrainTopAt に合わせる。 */
+  course?: CourseSpec;
 }
 
 export async function runQuadrupedGait(
@@ -451,13 +463,15 @@ export async function runQuadrupedGait(
   world.timestep = physicsDt;
   world.numSolverIterations = 8;
 
-  // 地面（共通コース: 平地）。横幅 y=3 で既存の cuboid(3,3,0.05)@(0,0,-0.05) と一致。
-  buildCourseColliders(world, COURSES.flat(), cfg.friction, 3);
+  // 走行コース（既定は平地。横幅 y=3 で既存の cuboid(3,3,0.05)@(0,0,-0.05) と一致）。
+  const course = overrides.course ?? COURSES.flat();
+  buildCourseColliders(world, course, cfg.friction, 3);
 
   const asm = buildQuad(world, cfg);
   const startX = asm.trunk.translation().x;
   const standZ = asm.trunk.translation().z;
-  const fallZ = standZ * 0.55; // 胴がここまで落ちたら転倒
+  // 転倒判定は地形相対（胴が直下地形から standZ*0.55 未満まで沈んだら転倒）。平地では従来と一致。
+  const fallClearance = standZ * 0.55;
   const fallTilt = 55 * DEG;
 
   const layout = layoutOf(cfg);
@@ -491,8 +505,23 @@ export async function runQuadrupedGait(
         -cfg.gait.strideM,
         cfg.gait.strideM,
       );
+      const trunkX = asm.trunk.translation().x;
+      // 胴基準の地形高さ = 4 hip 直下地形の平均（段の縁での基準ジャンプを緩和）。
+      let terrainBody = 0;
+      for (const leg of asm.legs) terrainBody += terrainTopAt(course, trunkX + leg.hipX);
+      terrainBody /= asm.legs.length;
       for (const leg of asm.legs) {
-        const tgt = gaitTargets(cfg, trunkPitch, bodyErrX, ts, leg.phase);
+        const tgt = gaitTargets(
+          cfg,
+          course,
+          trunkPitch,
+          terrainBody,
+          trunkX,
+          leg.hipX,
+          bodyErrX,
+          ts,
+          leg.phase,
+        );
         const hip = driveJoint(
           leg.hipJoint,
           asm.trunk,
@@ -522,7 +551,8 @@ export async function runQuadrupedGait(
     const trunkZ = asm.trunk.translation().z;
     const tilt = tiltFromUp(asm.trunk);
     const forwardX = asm.trunk.translation().x - startX;
-    const fallen = trunkZ < fallZ || tilt > fallTilt;
+    const bodyClearance = trunkZ - terrainTopAt(course, asm.trunk.translation().x);
+    const fallen = bodyClearance < fallClearance || tilt > fallTilt;
     if (fallen && fellTime === null) fellTime = t;
 
     maxDemandNm = Math.max(maxDemandNm, demand);

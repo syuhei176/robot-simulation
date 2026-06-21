@@ -1,5 +1,22 @@
 [
   {
+    "file": "quad-combined-sts3215.json",
+    "mechanism": "quad",
+    "course": "combined",
+    "motor": "sts3215",
+    "torqueCapNm": 2.942,
+    "baseline": {
+      "fitness": -0.2115,
+      "progressM": 0.4052,
+      "feasible": false
+    },
+    "tuned": {
+      "fitness": 2.2547,
+      "progressM": 2.29,
+      "feasible": true
+    }
+  },
+  {
     "file": "quad-flat-sts3215.json",
     "mechanism": "quad",
     "course": "flat",

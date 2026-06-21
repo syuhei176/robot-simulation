@@ -1,0 +1,124 @@
+{
+  "mechanism": "quad",
+  "course": "combined",
+  "motor": "sts3215",
+  "motorName": "Feetech STS3215 (12V)",
+  "torqueCapNm": 2.942,
+  "optimizedKeys": [
+    "period",
+    "strideM",
+    "liftM",
+    "standM",
+    "stanceDuty"
+  ],
+  "params": {
+    "mass": 1.2000000000000002,
+    "period": 1.8068700065216796,
+    "strideM": 0.07471860150130608,
+    "liftM": 0.07148216458019202,
+    "standM": 0.16092750111830145,
+    "stanceDuty": 0.6192445357530376
+  },
+  "baseline": {
+    "fitness": -0.2115,
+    "progressM": 0.4052,
+    "feasible": false
+  },
+  "tuned": {
+    "fitness": 2.2547,
+    "progressM": 2.29,
+    "feasible": true
+  },
+  "history": [
+    {
+      "gen": 0,
+      "best": 1.2041,
+      "mean": 0.7276,
+      "progressM": 1.2041
+    },
+    {
+      "gen": 1,
+      "best": 1.0253,
+      "mean": 0.5668,
+      "progressM": 1.0253
+    },
+    {
+      "gen": 2,
+      "best": 1.2841,
+      "mean": 0.7101,
+      "progressM": 1.2901
+    },
+    {
+      "gen": 3,
+      "best": 1.025,
+      "mean": 0.6231,
+      "progressM": 1.1083
+    },
+    {
+      "gen": 4,
+      "best": 1.718,
+      "mean": 1.271,
+      "progressM": 1.7321
+    },
+    {
+      "gen": 5,
+      "best": 1.4506,
+      "mean": 1.009,
+      "progressM": 2.2173
+    },
+    {
+      "gen": 6,
+      "best": 2.2362,
+      "mean": 1.1979,
+      "progressM": 2.29
+    },
+    {
+      "gen": 7,
+      "best": 1.4976,
+      "mean": 1.0971,
+      "progressM": 2.29
+    },
+    {
+      "gen": 8,
+      "best": 1.9549,
+      "mean": 1.3172,
+      "progressM": 1.9549
+    },
+    {
+      "gen": 9,
+      "best": 2.2547,
+      "mean": 1.4383,
+      "progressM": 2.29
+    },
+    {
+      "gen": 10,
+      "best": 1.5255,
+      "mean": 1.0449,
+      "progressM": 2.29
+    },
+    {
+      "gen": 11,
+      "best": 2.2019,
+      "mean": 1.5645,
+      "progressM": 2.29
+    },
+    {
+      "gen": 12,
+      "best": 2.2357,
+      "mean": 1.3654,
+      "progressM": 2.2486
+    },
+    {
+      "gen": 13,
+      "best": 2.2332,
+      "mean": 1.5093,
+      "progressM": 2.29
+    }
+  ],
+  "config": {
+    "gens": 14,
+    "popsize": 6,
+    "seed": 2,
+    "sigma": 0.3
+  }
+}

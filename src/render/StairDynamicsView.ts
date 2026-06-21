@@ -104,6 +104,22 @@ export class StairDynamicsView {
   }
 
   /**
+   * 四足など course を持つ機構用に地形メッシュを構築して表示する。
+   * 地形（this.stairs）は高さ=three-y=sim-z で四足リプレイと整合するので、そのまま重ねて描ける。
+   * 長いコース（合成コース等）は端まで見えるようカメラを引く。
+   */
+  showCourse(course: CourseSpec): void {
+    this.buildCourse(course);
+    this.stairs.visible = true;
+    const span = course.goalX;
+    if (span > 1.2) {
+      // 端から端まで俯瞰できる位置にカメラを引く。
+      this.controls.target.set(span * 0.5, 0.12, 0);
+      this.camera.position.set(span * 0.5, 0.55, Math.max(1.1, span * 0.9));
+    }
+  }
+
+  /**
    * 四足の動的リプレイ用メッシュを layout から構築する。シミュは z-up なので
    * quadGroup を x まわり -90° 回転して three の y-up へ変換し、子は sim 座標のまま置く。
    */

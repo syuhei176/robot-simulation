@@ -72,8 +72,8 @@ interface TunedRecord extends TunedManifestEntry {
 
 // ---- 状態 ----
 let mechId = MECHANISMS[0].id;
-let courseId: CourseId = 'stairs';
-let motorId = 'sts3215';
+let courseId: CourseId = 'combined';
+let motorId = 'scs0009';
 let torqueCapNm = getServo(motorId).stallNm;
 let paramValues: Record<string, number> = defaultParamValues(getMechanism(mechId));
 let replay: MechReplay | null = null;
