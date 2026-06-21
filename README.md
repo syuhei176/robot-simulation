@@ -31,13 +31,16 @@
   **scripted ↔ tuned を切り替えて再生・改善カーブを表示**する。`pnpm optimize-gait`
 - **平面歩容の学習（RL）** — 平面の蛇型で前進歩容を自前 PPO で学習するデモ（`playground.html`）。
   忠実な接触・トルク上限が揃ったので、登攀歩容の学習にも展開できる土台。
-- **3D 四足の強化学習（残差RL）** — `runQuadrupedGait` を 1 制御ステップずつ進められる RL 環境
+- **3D 四足の強化学習（残差RL・地形適応）** — `runQuadrupedGait` を 1 制御ステップずつ進められる RL 環境
   `QuadEnv`（`src/env/QuadEnv.ts`）に展開。方策が 8 関節（hip×4 + knee×4）を制御する。既定は **残差RL**＝
   IK クロール歩容に方策の補正を上乗せ（`--base-tuned auto` で CMA-ES の速い tuned 歩容を土台にできる）。
   土台が action=0 でも前進するので決定論方策も最初から歩き、end-to-end が嵌る「ノイズ依存の縮退（平均は静止）」を
-  回避できる。観測＝位相クロック＋胴 pitch/速度＋関節角、報酬＝前進−傾き−行動エネルギー−トルク飽和。学習は
-  Mac オフライン（`Policy`+`PPO`/TF.js）で方策の重みを `public/policies/*.json` に保存。`--base-gait false` で
-  end-to-end 比較も可能。`pnpm train-quad --base-tuned auto`
+  回避できる。観測＝位相クロック＋胴 pitch/速度＋関節角＋**前方地形プレビュー**（合成コースで段差を先読み）、
+  報酬＝前進−傾き−行動エネルギー−トルク飽和。学習は Mac オフライン（`Policy`+`PPO`/TF.js）。学習した方策の
+  決定論ロールアウトを **frames 記録**して `public/policies/*.replay.json` に保存し、**ダッシュボードの「RL」ボタンで
+  TF.js 無しで再生**できる。`pnpm train-quad --base-tuned auto`（end-to-end 比較は `--base-gait false`）
+  - 実績: 平地 小型四足×SCS0009 = 決定論 54cm/200step、合成コース 大型四足×STS3215（地形適応）= 障害物を越え
+    階段手前 93cm/500step（転倒なし）。
 
 ## 動かす
 
@@ -55,8 +58,9 @@ pnpm dev          # http://localhost:5173
     **地形適応歩容**でコースを選べる（合成コースは障害物＋低い階段を走破。高い段は転倒する）。
     **総質量スライダーが機体スケールを兼ねる**: 既定は 150g の小型四足 × SCS0009 で平地を歩くデモ。
     質量を上げると機体ごと大きくなり要求トルクが増える（合成コース走破は STS3215 + 大型機体 + tuned）。
-  - **scripted / tuned 切替** … `pnpm optimize-gait` の最適化結果（`public/tuned/`）がある 機構×コース×モーター で
-    tuned ボタンが有効になり、調整済み歩容＋改善カーブを再生する。
+  - **scripted / tuned / RL 切替** … `pnpm optimize-gait` の結果（`public/tuned/`）がある 機構×コース×モーター で
+    **tuned** が、`pnpm train-quad` の RL 方策記録（`public/policies/`）がある組合せで **RL** が有効になる。
+    tuned は調整済み歩容＋改善カーブ、RL は学習方策の記録リプレイ（frames）を再生する。
 - `http://localhost:5173/playground.html` … 平面蛇型の歩容学習（手動 CPG / PPO）デモ
 
 ## コマンド（Node 24 で実行）
