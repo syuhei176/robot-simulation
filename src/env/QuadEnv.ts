@@ -118,14 +118,15 @@ export class QuadEnv implements RLEnv {
   private curResidual: Float64Array;
   private residualBlend: Float64Array;
   private phase = 0;
-  private simTime = 0; // 土台歩容に渡す経過時間 [s]
+  private simSubstep = 0; // 物理サブステップの通算カウンタ
+  private simTime = 0; // 土台歩容に渡す経過時間 [s] = simSubstep * physicsDt（累積誤差を避け新規計算）
   private stepCount = 0;
   private prevX = 0;
   private readonly obs: Float32Array;
   // ダッシュボード再生用のフレーム記録（決定論ロールアウト時のみ有効化）。
   private recording = false;
+  private recordEvery = 3; // N 制御ステップごとに1フレーム記録（再生サイズ削減・60Hz→20fps）
   private frames: QuadFrame[] = [];
-  private recordT = 0;
   private epMaxDemand = 0;
   private epMaxApplied = 0;
   private epSatSteps = 0;
@@ -222,6 +223,7 @@ export class QuadEnv implements RLEnv {
     this.standZ = this.asm.trunk.translation().z;
     this.fallClearance = this.standZ * 0.55;
     this.phase = 0;
+    this.simSubstep = 0;
     this.simTime = 0;
     this.stepCount = 0;
     this.prevX = this.startX;
@@ -230,7 +232,6 @@ export class QuadEnv implements RLEnv {
     this.curResidual.fill(0);
     // 記録状態リセット（recording は enableRecording() で立てる）。
     this.frames = [];
-    this.recordT = 0;
     this.epMaxDemand = 0;
     this.epMaxApplied = 0;
     this.epSatSteps = 0;
@@ -241,18 +242,21 @@ export class QuadEnv implements RLEnv {
   }
 
   /** 次エピソードのフレームを記録する（決定論ロールアウト→ダッシュボード再生用）。reset() 後に呼ぶ。 */
-  enableRecording(): void {
+  enableRecording(recordEvery = 3): void {
     this.recording = true;
+    this.recordEvery = Math.max(1, Math.round(recordEvery));
     this.frames = [];
-    this.recordT = 0;
   }
 
   /** 記録したフレームから QuadDynReplay（layout+frames+summary）を組み立てる。 */
   getReplay(): QuadDynReplay {
     const forwardDistanceM = this.asm.trunk.translation().x - this.startX;
     const fell = this.epFellTime !== null;
+    // duration は記録の実時間（= 経過 sim 時間）。ダッシュボードの QuadReplay が再生長に使うので、
+    // 既定 config.duration(5s) ではなく実エピソード長にする（さもないと長い記録が 5s でループする）。
+    const duration = this.simSubstep * this.physicsDt;
     const summary = {
-      config: this.dyn,
+      config: { ...this.dyn, duration },
       forwardDistanceM,
       maxDemandNm: this.epMaxDemand,
       maxAppliedNm: this.epMaxApplied,
@@ -267,23 +271,35 @@ export class QuadEnv implements RLEnv {
   }
 
   /**
-   * 脚 legIndex の「土台ターゲット」（残差を足す前の中心）を返す。
-   * baseGait=true は IK クロール歩容（胴速度レギュレータ付き・scripted 歩容と同じ）、false は静止立脚。
+   * 脚 legIndex の「土台ターゲット」（残差を足す前の中心）を返す。baseGait=true は地形適応 IK クロール歩容
+   * （胴速度レギュレータ＋地形追従・`runQuadrupedGait` の gaitTargets と同じ）、false は静止立脚。
+   * terrainBody = 4 hip 直下地形の平均（段の縁での基準ジャンプを緩和）。平地では terrainDz=0 で平地クロールに一致。
    */
   private baseTargets(
     legIndex: number,
     trunkPitch: number,
     trunkX: number,
+    terrainBody: number,
   ): { hip: number; knee: number } {
     if (!this.cfg.baseGait) return { hip: this.hip0, knee: this.knee0 };
     const g = this.dyn.gait;
+    const leg = this.asm.legs[legIndex];
     // 胴速度レギュレータ: 足を世界の接地点に収束させ過走/滑りを抑える（±stride で clamp）。
     const bodyErrX = Math.max(
       -g.strideM,
       Math.min(g.strideM, trunkX - this.startX - this.vBody * this.simTime),
     );
-    const { fx, fz } = footTargetRelHip(this.dyn, this.simTime, this.asm.legs[legIndex].phase);
-    const { p1, p2 } = legIK(fx + bodyErrX, fz, this.dyn.leg.thigh, this.dyn.leg.shin, KNEE_SIGN);
+    const { fx, fz } = footTargetRelHip(this.dyn, this.simTime, leg.phase);
+    // 地形適応: 足先 z 目標を terrainTopAt(footWorldX) − terrainBody ぶんずらして地形に沿わせる。
+    const footWorldX = trunkX + leg.hipX + fx + bodyErrX;
+    const terrainDz = terrainTopAt(this.course, footWorldX) - terrainBody;
+    const { p1, p2 } = legIK(
+      fx + bodyErrX,
+      fz + terrainDz,
+      this.dyn.leg.thigh,
+      this.dyn.leg.shin,
+      KNEE_SIGN,
+    );
     return { hip: p1 - trunkPitch, knee: p2 - p1 };
   }
 
@@ -306,11 +322,17 @@ export class QuadEnv implements RLEnv {
         this.residualBlend[j] =
           this.prevResidual[j] + alpha * (this.curResidual[j] - this.prevResidual[j]);
       }
+      // 歩容時刻は累積でなく通算サブステップ×physicsDt で新規計算（カオス系での累積誤差→発散を防ぐ）。
+      this.simTime = this.simSubstep * this.physicsDt;
       const trunkPitch = pitchAboutY(this.asm.trunk);
       const trunkX = this.asm.trunk.translation().x;
+      // 胴基準の地形高さ = 4 hip 直下地形の平均（段の縁での基準ジャンプを緩和。平地では 0）。
+      let terrainBody = 0;
+      for (const leg of this.asm.legs) terrainBody += terrainTopAt(this.course, trunkX + leg.hipX);
+      terrainBody /= this.asm.legs.length;
       for (let leg = 0; leg < 4; leg++) {
         const L = this.asm.legs[leg];
-        const base = this.baseTargets(leg, trunkPitch, trunkX);
+        const base = this.baseTargets(leg, trunkPitch, trunkX, terrainBody);
         const hip = driveJoint(
           L.hipJoint,
           this.asm.trunk,
@@ -342,7 +364,7 @@ export class QuadEnv implements RLEnv {
         this.physicsDt,
       );
       this.world.step();
-      this.simTime += this.physicsDt;
+      this.simSubstep++;
       this.phase += clockW * this.physicsDt;
     }
     // 次ステップの補間始点として確定。
@@ -381,24 +403,27 @@ export class QuadEnv implements RLEnv {
 
     if (this.recording) {
       const saturated = satCount > 0;
+      const realT = this.simSubstep * this.physicsDt; // フレームの実時刻（累積でなく新規計算）
+      // サマリ統計は毎ステップ更新、フレームは recordEvery ごと（＋終端）に間引いて push。
       this.epMaxDemand = Math.max(this.epMaxDemand, stepDemand);
       this.epMaxApplied = Math.max(this.epMaxApplied, stepApplied);
       if (saturated) this.epSatSteps++;
       this.epMinZ = Math.min(this.epMinZ, z);
       this.epMaxTilt = Math.max(this.epMaxTilt, tiltDeg);
-      if (fell && this.epFellTime === null) this.epFellTime = this.recordT;
-      this.frames.push(
-        captureFrame(this.asm, this.recordT, {
-          demandNm: stepDemand,
-          appliedNm: stepApplied,
-          saturated,
-          trunkZ: z,
-          tiltDeg,
-          forwardX: x - this.startX,
-          fallen: fell,
-        }),
-      );
-      this.recordT += this.controlPeriod;
+      if (fell && this.epFellTime === null) this.epFellTime = realT;
+      if (this.stepCount % this.recordEvery === 0 || done) {
+        this.frames.push(
+          captureFrame(this.asm, realT, {
+            demandNm: stepDemand,
+            appliedNm: stepApplied,
+            saturated,
+            trunkZ: z,
+            tiltDeg,
+            forwardX: x - this.startX,
+            fallen: fell,
+          }),
+        );
+      }
     }
 
     return { obs: this.writeObs(), reward, done };

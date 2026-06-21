@@ -7,7 +7,7 @@
     "motorName": "Feetech STS3215 (12V)",
     "mass": 1.2,
     "base": "tuned歩容(quad-combined-sts3215.json)",
-    "forwardM": 0.9314,
+    "forwardM": 2.4132,
     "fell": false
   },
   {
