@@ -18,6 +18,7 @@ import RAPIER, {
   type World,
 } from '@dimforge/rapier3d-compat';
 import { G } from './chain.ts';
+import { COURSES, buildCourseColliders } from './course.ts';
 
 export interface QuadDynConfig {
   trunk: { length: number; width: number; height: number; mass: number };
@@ -450,10 +451,8 @@ export async function runQuadrupedGait(
   world.timestep = physicsDt;
   world.numSolverIterations = 8;
 
-  // 地面
-  world.createCollider(
-    RAPIER.ColliderDesc.cuboid(3, 3, 0.05).setTranslation(0, 0, -0.05).setFriction(cfg.friction),
-  );
+  // 地面（共通コース: 平地）。横幅 y=3 で既存の cuboid(3,3,0.05)@(0,0,-0.05) と一致。
+  buildCourseColliders(world, COURSES.flat(), cfg.friction, 3);
 
   const asm = buildQuad(world, cfg);
   const startX = asm.trunk.translation().x;

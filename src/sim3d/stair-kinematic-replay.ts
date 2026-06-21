@@ -1,4 +1,6 @@
 import { reachArc, staticTorques } from './chain.ts';
+import type { CourseSpec } from './course.ts';
+import { resolveCourse } from './stair-dynamics.ts';
 import type {
   StairDynamicsConfig,
   StairDynamicsFrame,
@@ -50,12 +52,12 @@ function smoothstep(t: number): number {
   return u * u * (3 - 2 * u);
 }
 
-function chooseLiftLinks(config: StairDynamicsConfig): number {
+function chooseLiftLinks(config: StairDynamicsConfig, course: CourseSpec): number {
   const linkLen = config.morphology.totalLength / config.morphology.n;
   const candidates = [
-    [config.stair.forward * 0.4, config.stair.rise + config.clearance],
-    [config.stair.forward + 0.05, config.stair.rise + config.clearance * 0.75],
-    [config.stair.forward + 0.06, config.stair.rise + 0.01],
+    [course.stepForward * 0.4, course.stepRise + config.clearance],
+    [course.stepForward + 0.05, course.stepRise + config.clearance * 0.75],
+    [course.stepForward + 0.06, course.stepRise + 0.01],
   ];
   const maxChord = Math.max(...candidates.map(([x, z]) => Math.hypot(x, z)));
 
@@ -66,27 +68,11 @@ function chooseLiftLinks(config: StairDynamicsConfig): number {
   return liftLinks;
 }
 
-function buildTerrainPath(config: StairDynamicsConfig): TerrainPath {
+function buildTerrainPath(config: StairDynamicsConfig, course: CourseSpec): TerrainPath {
+  // 体の中心高さ（地形上面から baseZ 持ち上げた輪郭）を蛇の参照軌道とする。
   const baseZ = config.morphology.bodyThickness / 2 + 0.006;
-  const startX = -(config.morphology.totalLength + config.stair.forward + 0.1);
-  const points: Array<[number, number]> = [
-    [startX, baseZ],
-    [0, baseZ],
-  ];
-  let topStartIndex = 1;
-
-  for (let step = 0; step < config.stair.stepCount; step++) {
-    const x = step * config.stair.treadDepth;
-    const topZ = baseZ + (step + 1) * config.stair.rise;
-    points.push([x, topZ]);
-    topStartIndex = points.length - 1;
-    points.push([(step + 1) * config.stair.treadDepth, topZ]);
-  }
-
-  points.push([
-    config.stair.stepCount * config.stair.treadDepth + config.morphology.totalLength + 0.25,
-    baseZ + config.stair.stepCount * config.stair.rise,
-  ]);
+  const points: Array<[number, number]> = course.profile.map(([x, z]) => [x, z + baseZ]);
+  const startX = points[0][0];
 
   const cumulative = [0];
   for (let i = 1; i < points.length; i++) {
@@ -96,22 +82,28 @@ function buildTerrainPath(config: StairDynamicsConfig): TerrainPath {
     );
   }
 
+  // 落とし所: x <= plateauStartX を満たす最後の頂点（最上段の蹴上げ上端）。
+  let topStartIndex = 0;
+  for (let i = 0; i < points.length; i++) {
+    if (points[i][0] <= course.plateauStartX + 1e-6) topStartIndex = i;
+  }
+
   return {
     points,
     cumulative,
     startX,
     topStartS: cumulative[topStartIndex],
-    topZ: baseZ + config.stair.stepCount * config.stair.rise,
+    topZ: baseZ + Math.max(...course.profile.map(([, z]) => z)),
     totalLength: cumulative[cumulative.length - 1],
   };
 }
 
-function staticArcPeak(config: StairDynamicsConfig, liftLinks: number): number {
+function staticArcPeak(config: StairDynamicsConfig, course: CourseSpec, liftLinks: number): number {
   const linkLen = config.morphology.totalLength / config.morphology.n;
   const linkMass = config.morphology.totalMass / config.morphology.n;
   const lengths = new Array<number>(liftLinks).fill(linkLen);
   const masses = new Array<number>(liftLinks).fill(linkMass);
-  const arc = reachArc(lengths, config.stair.forward, config.stair.rise);
+  const arc = reachArc(lengths, course.stepForward, course.stepRise);
   return staticTorques(lengths, masses, arc.absAngles).peak;
 }
 
@@ -177,14 +169,19 @@ export function createKinematicStairReplay(
     },
   };
 
-  const path = buildTerrainPath(config);
-  const liftLinks = chooseLiftLinks(config);
-  const startFrontS = -config.stair.forward - path.startX;
-  const tailTopMargin = Math.min(config.stair.treadDepth * 0.45, 0.12);
+  // コースを解決して config に固定する（下流の物理/診断/描画が同じ真実を読む）。
+  const course = resolveCourse(config);
+  config.course = course;
+
+  const path = buildTerrainPath(config, course);
+  const liftLinks = chooseLiftLinks(config, course);
+  const startFrontS = -course.stepForward - path.startX;
+  const tailTopMargin = Math.min(Math.max(0, course.goalX - course.plateauStartX) * 0.45, 0.12);
   const finalTailS = path.topStartS + tailTopMargin;
   const finalFrontS = finalTailS + config.morphology.totalLength;
   const travel = finalFrontS - startFrontS;
-  const duration = overrides.duration ?? Math.max(config.duration, travel / 0.18);
+  const referenceSpeed = config.referenceSpeed ?? 0.18;
+  const duration = overrides.duration ?? Math.max(config.duration, travel / referenceSpeed);
   config.duration = duration;
 
   const frames: StairDynamicsFrame[] = [];
@@ -200,7 +197,7 @@ export function createKinematicStairReplay(
   const summary: StairDynamicsSummary = {
     config,
     liftLinks,
-    staticArcPeakNm: staticArcPeak(config, liftLinks),
+    staticArcPeakNm: staticArcPeak(config, course, liftLinks),
     maxDemandTorqueNm: 0.501,
     maxDemandTimeS: 0,
     maxAppliedTorqueNm: 0.501,

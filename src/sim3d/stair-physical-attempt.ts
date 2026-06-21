@@ -7,8 +7,10 @@ import RAPIER, {
 } from '@dimforge/rapier3d-compat';
 
 import { G } from './chain.ts';
+import { buildCourseColliders, terrainTopAt } from './course.ts';
 import { addStairFeasibilityDiagnostics } from './stair-feasibility.ts';
 import { createKinematicStairReplay } from './stair-kinematic-replay.ts';
+import { resolveCourse } from './stair-dynamics.ts';
 import type {
   JointMotorConfig,
   StairDynamicsConfig,
@@ -72,58 +74,6 @@ function sagittalAngle(body: RigidBody): number {
 
 function sagittalAngularVelocity(body: RigidBody): number {
   return -body.angvel().y;
-}
-
-function terrainTopAt(config: StairDynamicsConfig, x: number): number {
-  if (x < 0) return 0;
-  const stairEnd = config.stair.stepCount * config.stair.treadDepth;
-  if (x >= stairEnd) return config.stair.stepCount * config.stair.rise;
-  return (Math.floor(x / config.stair.treadDepth) + 1) * config.stair.rise;
-}
-
-function createStairs(world: World, config: StairDynamicsConfig): Collider[] {
-  const env: Collider[] = [];
-  const halfWidth = 0.35;
-  const baseThickness = 0.04;
-  const halfDepth = config.stair.treadDepth / 2;
-
-  env.push(
-    world.createCollider(
-      RAPIER.ColliderDesc.cuboid(1.5, halfWidth, baseThickness / 2)
-        .setTranslation(-0.75, 0, -baseThickness / 2)
-        .setFriction(config.friction)
-        .setRestitution(0),
-    ),
-  );
-
-  for (let i = 0; i < config.stair.stepCount; i++) {
-    const height = (i + 1) * config.stair.rise;
-    env.push(
-      world.createCollider(
-        RAPIER.ColliderDesc.cuboid(halfDepth, halfWidth, height / 2)
-          .setTranslation(i * config.stair.treadDepth + halfDepth, 0, height / 2)
-          .setFriction(config.friction)
-          .setRestitution(0),
-      ),
-    );
-  }
-
-  const landingHeight = config.stair.stepCount * config.stair.rise;
-  const landingDepth = config.morphology.totalLength + 0.45;
-  env.push(
-    world.createCollider(
-      RAPIER.ColliderDesc.cuboid(landingDepth / 2, halfWidth, landingHeight / 2)
-        .setTranslation(
-          config.stair.stepCount * config.stair.treadDepth + landingDepth / 2,
-          0,
-          landingHeight / 2,
-        )
-        .setFriction(config.friction)
-        .setRestitution(0),
-    ),
-  );
-
-  return env;
 }
 
 function createChainFromFrame(
@@ -246,11 +196,12 @@ function assemblyComVelocity(assembly: ChainAssembly): [number, number] {
 
 function supportedLinkIndices(config: StairDynamicsConfig, assembly: ChainAssembly): number[] {
   const halfThickness = config.morphology.bodyThickness / 2;
+  const course = resolveCourse(config);
   const supported: number[] = [];
   for (let i = 0; i < assembly.links.length; i++) {
     const body = assembly.links[i].body;
     const p = body.translation();
-    const centerClearance = p.z - halfThickness - terrainTopAt(config, p.x);
+    const centerClearance = p.z - halfThickness - terrainTopAt(course, p.x);
     const flatEnough = Math.abs(normalizeAngle(sagittalAngle(body))) < 0.75;
     if (flatEnough && centerClearance > -0.025 && centerClearance < 0.045) {
       supported.push(i);
@@ -389,15 +340,16 @@ function readContacts(
 }
 
 function physicalSuccess(config: StairDynamicsConfig, finalFrame: StairDynamicsFrame): boolean {
-  const topZ = config.stair.stepCount * config.stair.rise;
-  const stairEndX = config.stair.stepCount * config.stair.treadDepth;
+  const course = resolveCourse(config);
+  const topZ = Math.max(...course.profile.map(([, z]) => z)); // 目的プラトーの高さ
+  const goalX = course.goalX;
   const minZ = Math.min(...finalFrame.links.map((link) => link.z));
   const minX = Math.min(...finalFrame.links.map((link) => link.x));
   const maxX = Math.max(...finalFrame.links.map((link) => link.x));
   return (
     minZ >= topZ - config.morphology.bodyThickness * 0.2 &&
-    minX >= stairEndX - 0.15 &&
-    maxX > stairEndX + 0.35
+    minX >= goalX - 0.15 &&
+    maxX > goalX + 0.35
   );
 }
 
@@ -415,7 +367,7 @@ export async function runPhysicalStairAttemptReplay(
   world.numInternalPgsIterations = 2;
 
   try {
-    const env = createStairs(world, config);
+    const env = buildCourseColliders(world, resolveCourse(config), config.friction);
     const assembly = createChainFromFrame(world, config, targetReplay.frames[0]);
     const frames: StairDynamicsFrame[] = [];
     const steps = Math.ceil(config.duration / config.dt);

@@ -7,6 +7,7 @@ import RAPIER, {
 } from '@dimforge/rapier3d-compat';
 
 import { G, reachArc, staticTorques } from './chain.ts';
+import { COURSES, buildCourseColliders, type CourseSpec } from './course.ts';
 
 export interface Morphology3d {
   n: number;
@@ -32,12 +33,19 @@ export interface JointMotorConfig {
 export interface StairDynamicsConfig {
   morphology: Morphology3d;
   stair: StairGeometry;
+  /**
+   * コース（地形）。未指定なら `stair` から階段コースを生成する（後方互換）。
+   * これを差し替えると蛇/四足が同じコース上を走る。
+   */
+  course?: CourseSpec;
   friction: number;
   dt: number;
   duration: number;
   motor: JointMotorConfig;
   clearance: number;
   tractionProbeForceN: number;
+  /** 蛇の参照軌道の進行速度 [m/s]。歩容を「初期モーションとして与える」ライブ調整つまみ。既定 0.18。 */
+  referenceSpeed?: number;
   /** 歩容の時間スケール（1=基準, 2=2倍ゆっくり）。加速∝1/scale²で動的トルクを下げる。 */
   gaitTimeScale?: number;
   /** 開始 warmup 区間 [s]。生成直後の整定トランジェントを要求トルク統計から除外する。 */
@@ -273,32 +281,9 @@ function targetAt(t: number, targets: TargetKeyframes, gaitTimeScale = 1): numbe
   return targets.place;
 }
 
-function createStairs(world: World, config: StairDynamicsConfig): Collider[] {
-  const env: Collider[] = [];
-  const halfDepth = config.stair.treadDepth / 2;
-  const halfWidth = 0.35;
-  const baseThickness = 0.04;
-
-  env.push(
-    world.createCollider(
-      RAPIER.ColliderDesc.cuboid(1.4, halfWidth, baseThickness / 2)
-        .setTranslation(-0.7, 0, -baseThickness / 2)
-        .setFriction(config.friction),
-    ),
-  );
-
-  for (let i = 0; i < config.stair.stepCount; i++) {
-    const height = (i + 1) * config.stair.rise;
-    env.push(
-      world.createCollider(
-        RAPIER.ColliderDesc.cuboid(halfDepth, halfWidth, height / 2)
-          .setTranslation(i * config.stair.treadDepth + halfDepth, 0, height / 2)
-          .setFriction(config.friction),
-      ),
-    );
-  }
-
-  return env;
+/** config からコースを得る。`course` 未指定なら `stair` から階段コースを生成（後方互換）。 */
+export function resolveCourse(config: StairDynamicsConfig): CourseSpec {
+  return config.course ?? COURSES.stairs(config.stair);
 }
 
 function centerlinePoints(
@@ -539,7 +524,7 @@ async function simulateStairDynamics(
   world.numInternalPgsIterations = 1;
 
   try {
-    const env = createStairs(world, config);
+    const env = buildCourseColliders(world, resolveCourse(config), config.friction);
     const assembly = createChain(world, config, liftLinks, targets.prepare);
     const linkLen = config.morphology.totalLength / config.morphology.n;
     const steps = Math.ceil(config.duration / config.dt);

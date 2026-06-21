@@ -6,6 +6,7 @@ import type {
   StairFrameDiagnostics,
 } from '../sim3d/stair-dynamics.ts';
 import type { QuadBodyLayout, QuadFrame } from '../sim3d/quadruped-dynamics.ts';
+import { COURSES, type CourseSpec } from '../sim3d/course.ts';
 
 const LINK_COLOR = 0x16a3b8;
 const HEAD_COLOR = 0xf2a33a;
@@ -20,11 +21,6 @@ const DEFAULT_VIEW_MORPHOLOGY = {
   totalLength: 0.9,
   bodyWidth: 0.04,
   bodyThickness: 0.028,
-};
-const DEFAULT_VIEW_STAIR = {
-  rise: 0.18,
-  treadDepth: 0.25,
-  stepCount: 3,
 };
 
 export class StairDynamicsView {
@@ -74,7 +70,7 @@ export class StairDynamicsView {
     this.quadGroup.visible = false;
 
     this.buildEnvironment();
-    this.buildStairs();
+    this.buildCourse();
     this.buildLinks(DEFAULT_VIEW_MORPHOLOGY.n);
 
     window.addEventListener('resize', () => this.resize());
@@ -87,7 +83,7 @@ export class StairDynamicsView {
 
   setReplay(replay: StairDynamicsReplay): void {
     this.replay = replay;
-    this.buildStairs(replay);
+    this.buildCourse(replay.summary.config.course);
     this.buildLinks(replay.summary.config.morphology.n);
     this.applyFrame(replay.frames[0]);
     this.controls.target.set(-0.14, 0.16, 0);
@@ -261,26 +257,14 @@ export class StairDynamicsView {
     this.scene.add(this.stairs);
   }
 
-  private buildStairs(replay?: StairDynamicsReplay): void {
+  /** コース（地形）の箱を描画する。コライダと同じ CourseSpec.boxes を使うので両者が一致する。 */
+  private buildCourse(course: CourseSpec = COURSES.stairs()): void {
     this.stairs.clear();
-    const stair = replay?.summary.config.stair ?? DEFAULT_VIEW_STAIR;
-    const morphology = replay?.summary.config.morphology ?? DEFAULT_VIEW_MORPHOLOGY;
-
-    this.addStairBlock(-0.7, -0.02, 1.4, 0.04);
-    for (let i = 0; i < stair.stepCount; i++) {
-      const height = (i + 1) * stair.rise;
-      const x = i * stair.treadDepth + stair.treadDepth / 2;
-      this.addStairBlock(x, height / 2, stair.treadDepth, height);
+    for (const box of course.boxes) {
+      // 高さ 0 の箱（平地の薄板など）は描画してもグリッドと干渉するだけなので、底のある箱のみ。
+      if (box.halfZ <= 1e-6) continue;
+      this.addStairBlock(box.cx, box.cz, box.halfX * 2, box.halfZ * 2);
     }
-
-    const landingHeight = stair.stepCount * stair.rise;
-    const landingDepth = morphology.totalLength + 0.45;
-    this.addStairBlock(
-      stair.stepCount * stair.treadDepth + landingDepth / 2,
-      landingHeight / 2,
-      landingDepth,
-      landingHeight,
-    );
   }
 
   private addStairBlock(x: number, y: number, width: number, height: number): void {

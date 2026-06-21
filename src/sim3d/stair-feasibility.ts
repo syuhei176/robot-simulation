@@ -1,4 +1,6 @@
 import { G } from './chain.ts';
+import { terrainTopAt as courseTopAt } from './course.ts';
+import { resolveCourse } from './stair-dynamics.ts';
 import {
   DEFAULT_STAIR_REPLAY_CONFIG,
   createKinematicStairReplay,
@@ -42,10 +44,7 @@ function normalizeAngle(rad: number): number {
 }
 
 function terrainTopAt(config: StairDynamicsConfig, x: number): number {
-  if (x < 0) return 0;
-  const topX = config.stair.stepCount * config.stair.treadDepth;
-  if (x >= topX) return config.stair.stepCount * config.stair.rise;
-  return (Math.floor(x / config.stair.treadDepth) + 1) * config.stair.rise;
+  return courseTopAt(resolveCourse(config), x);
 }
 
 function clearanceAtPoint(

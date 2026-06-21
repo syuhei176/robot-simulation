@@ -3,14 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Microbots RL — マイクロボット強化学習</title>
+    <title>Microbots — 機構 × コース × モーション</title>
     <style>
       :root {
         --accent: #35c8ff;
-        --bg: #05070b;
-        --panel: rgba(12, 18, 28, 0.82);
+        --panel: rgba(12, 18, 28, 0.84);
         --text: #d8e6f2;
-        --muted: #6f86a0;
+        --muted: #7890a8;
         --good: #4ade80;
         --warn: #facc15;
         --bad: #ef4444;
@@ -23,7 +22,7 @@
         margin: 0;
         height: 100%;
         overflow: hidden;
-        background: var(--bg);
+        background: #070806;
         color: var(--text);
         font-family: ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
       }
@@ -35,7 +34,9 @@
         position: fixed;
         top: 16px;
         left: 16px;
-        width: 320px;
+        width: 340px;
+        max-height: calc(100vh - 32px);
+        overflow-y: auto;
         padding: 16px 18px;
         background: var(--panel);
         border: 1px solid rgba(53, 200, 255, 0.25);
@@ -44,15 +45,19 @@
         font-size: 13px;
         user-select: none;
       }
-      #panel h1 {
-        font-size: 15px;
+      h1 {
         margin: 0 0 2px;
+        font-size: 15px;
         letter-spacing: 0.04em;
       }
       .sub {
         color: var(--muted);
         font-size: 11px;
         margin-bottom: 12px;
+      }
+      .sub a {
+        color: var(--accent);
+        text-decoration: none;
       }
       .row {
         display: flex;
@@ -68,23 +73,25 @@
         border-radius: 8px;
         cursor: pointer;
         font-size: 13px;
-        transition: background 0.15s;
-      }
-      button:hover {
-        background: rgba(53, 200, 255, 0.24);
       }
       button.active {
         background: var(--accent);
         color: #04121b;
         font-weight: 600;
       }
-      button.go {
-        border-color: rgba(74, 222, 128, 0.5);
-        background: rgba(74, 222, 128, 0.14);
-      }
-      .modes button {
-        padding-inline: 6px;
+      select {
+        flex: 1;
+        padding: 7px 8px;
+        background: rgba(53, 200, 255, 0.1);
+        color: var(--text);
+        border: 1px solid rgba(53, 200, 255, 0.4);
+        border-radius: 8px;
         font-size: 12px;
+        cursor: pointer;
+      }
+      select:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
       }
       label {
         margin: 9px 0 3px;
@@ -100,17 +107,14 @@
         width: 100%;
         accent-color: var(--accent);
       }
-      .hidden {
-        display: none;
-      }
-      canvas#rl-curve {
-        width: 100%;
-        height: 84px;
-        background: rgba(0, 0, 0, 0.35);
-        border: 1px solid rgba(53, 200, 255, 0.18);
-        border-radius: 6px;
-        margin: 6px 0 10px;
-        display: block;
+      .section-title {
+        margin: 14px 0 2px;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        text-transform: uppercase;
+        border-top: 1px solid rgba(53, 200, 255, 0.18);
+        padding-top: 10px;
       }
       .stats {
         margin-top: 10px;
@@ -135,108 +139,43 @@
       .stats b.bad {
         color: var(--bad);
       }
-      .note {
-        margin-top: 10px;
-        font-size: 10.5px;
-        color: var(--muted);
-        line-height: 1.5;
-      }
     </style>
   </head>
   <body>
     <div id="app"></div>
     <div id="panel">
-      <h1>MICROBOTS · RL</h1>
-      <div class="sub">ベイマックス風マイクロボット鎖 · Three.js + 自前PPO</div>
-
-      <div class="row modes">
-        <button id="mode-cpg">手動 CPG</button>
-        <button id="mode-rl" class="active">強化学習</button>
-        <button id="mode-stair">階段再生</button>
+      <h1 id="title">MICROBOTS</h1>
+      <div class="sub">
+        機構 × コース × モーション ·
+        <a href="/playground.html">平地2D学習デモ →</a>
       </div>
-
-      <!-- ===== 手動 CPG ===== -->
-      <div id="section-cpg" class="hidden">
-        <label>振幅 amplitude <span id="v-amp"></span></label>
-        <input id="s-amp" type="range" min="0" max="1.0" step="0.01" />
-        <label>周波数 frequency <span id="v-freq"></span></label>
-        <input id="s-freq" type="range" min="0" max="1.6" step="0.01" />
-        <label>位相差 phaseLag <span id="v-phase"></span></label>
-        <input id="s-phase" type="range" min="0.2" max="1.8" step="0.01" />
-        <label>旋回 turnBias <span id="v-turn"></span></label>
-        <input id="s-turn" type="range" min="-0.5" max="0.5" step="0.01" />
-        <div class="note">serpenoid 波を手で調整。RL の比較用ベースライン。</div>
+      <div class="sub" id="mech-subtitle" style="margin-top: -8px"></div>
+      <div class="row">
+        <!-- options populated from MECHANISMS in dashboard.ts -->
+        <select id="sel-mech"></select>
+        <!-- options populated from SELECTABLE_SERVO_IDS in dashboard.ts -->
+        <select id="sel-motor"></select>
       </div>
-
-      <!-- ===== 強化学習 ===== -->
-      <div id="section-rl">
-        <div class="row">
-          <button id="btn-train" class="go">▶ 学習開始</button>
-          <button id="btn-reset-weights">重みリセット</button>
-        </div>
-        <div class="row">
-          <button id="btn-save">保存</button>
-          <button id="btn-load">読込</button>
-        </div>
-        <label>平均前進距離 / イテレーション</label>
-        <canvas id="rl-curve" width="240" height="84"></canvas>
-        <div class="stats">
-          <div>イテレーション</div>
-          <div><b id="st-iter">0</b></div>
-          <div>平均前進</div>
-          <div><b id="st-fwd">0.0</b> m</div>
-          <div>探索 std</div>
-          <div><b id="st-std">—</b></div>
-          <div>観測中の速度</div>
-          <div><b id="st-speed">0.0</b> m/s</div>
-          <div>バックエンド</div>
-          <div><b id="st-backend">…</b></div>
-        </div>
-        <div class="note">
-          方策(ニューラルネット)が状態＋位相クロックから各関節の目標角を直接出力する end-to-end
-          制御。PPO で「速く前進」を学習。3D
-          は現在の方策をライブ再生中（学習中は更新がカクつきます）。
-        </div>
+      <div class="row">
+        <!-- options populated from COURSE_OPTIONS in dashboard.ts -->
+        <select id="sel-course" title="コース（地形）"></select>
       </div>
-
-      <!-- ===== 階段再生 ===== -->
-      <div id="section-stair" class="hidden">
-        <div class="row">
-          <button id="btn-stair-play" class="active">⏸ 一時停止</button>
-          <button id="btn-stair-reset">先頭へ</button>
-        </div>
-        <label>再生位置 <span id="v-stair-time">0.00s</span></label>
-        <input id="s-stair-time" type="range" min="0" max="4" step="0.01" value="0" />
-        <label>再生速度 <span id="v-stair-speed">1.00x</span></label>
-        <input id="s-stair-speed" type="range" min="0.25" max="2" step="0.05" value="1" />
-        <label>診断 τ上限 <span id="v-stair-torque-cap">0.25 N·m</span></label>
-        <input id="s-stair-torque-cap" type="range" min="0.05" max="2.5" step="0.05" value="0.25" />
-        <label>診断 摩擦 μ <span id="v-stair-friction">0.60</span></label>
-        <input id="s-stair-friction" type="range" min="0.15" max="1.4" step="0.05" value="0.6" />
-        <div class="stats">
-          <div>状態</div>
-          <div><b id="st-stair-status">準備中</b></div>
-          <div>現在 τ/cap</div>
-          <div><b id="st-stair-tau-now">—</b></div>
-          <div>ピーク τ/cap</div>
-          <div><b id="st-stair-tau">—</b></div>
-          <div>現在 μ/設定</div>
-          <div><b id="st-stair-mu-now">—</b></div>
-          <div>ピーク μ要求</div>
-          <div><b id="st-stair-mu">—</b></div>
-          <div>滑り速度</div>
-          <div><b id="st-stair-slip">—</b></div>
-          <div>最小 clearance</div>
-          <div><b id="st-stair-clearance">—</b></div>
-          <div>支持リンク</div>
-          <div><b id="st-stair-supports">—</b></div>
-          <div>初回破綻</div>
-          <div><b id="st-stair-first-failure">—</b></div>
-          <div>final head</div>
-          <div><b id="st-stair-head">—</b></div>
-        </div>
+      <div class="row">
+        <button id="btn-play" class="active">⏸ 一時停止</button>
+        <button id="btn-reset">先頭へ</button>
       </div>
+      <label>再生位置 <span id="v-time">0.00s</span></label>
+      <input id="s-time" type="range" min="0" max="4" step="0.01" value="0" />
+      <label>再生速度 <span id="v-speed">1.00x</span></label>
+      <input id="s-speed" type="range" min="0.25" max="2" step="0.05" value="1" />
+      <label>モーター τ上限 <span id="v-torque-cap">2.94 N·m</span></label>
+      <input id="s-torque-cap" type="range" min="0.05" max="3.5" step="0.05" value="2.94" />
+      <div class="section-title">モーション（初期歩容を与える）</div>
+      <!-- sliders injected from mechanism.params in dashboard.ts -->
+      <div id="param-sliders"></div>
+      <!-- rows injected from liveStats()/resultStats() in dashboard.ts -->
+      <div class="stats" id="stats"></div>
     </div>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/dashboard.ts"></script>
   </body>
 </html>

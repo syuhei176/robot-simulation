@@ -6,7 +6,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: 'index.html',
-        stair: 'stair.html',
+        playground: 'playground.html',
       },
     },
   },
