@@ -17,6 +17,23 @@
     }
   },
   {
+    "file": "quad-flat-scs0009.json",
+    "mechanism": "quad",
+    "course": "flat",
+    "motor": "scs0009",
+    "torqueCapNm": 0.2256,
+    "baseline": {
+      "fitness": 0.1749,
+      "progressM": 0.1749,
+      "feasible": true
+    },
+    "tuned": {
+      "fitness": 0.721,
+      "progressM": 0.721,
+      "feasible": true
+    }
+  },
+  {
     "file": "quad-flat-sts3215.json",
     "mechanism": "quad",
     "course": "flat",

@@ -439,6 +439,8 @@ export interface QuadDynOverrides {
   dt?: number;
   substeps?: number;
   duration?: number;
+  lateralStabK?: number;
+  lateralStabD?: number;
   /** 走行コース（地形）。未指定は平地。地形適応歩容が足先を terrainTopAt に合わせる。 */
   course?: CourseSpec;
 }

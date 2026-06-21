@@ -1,0 +1,184 @@
+{
+  "mechanism": "quad",
+  "course": "flat",
+  "motor": "scs0009",
+  "motorName": "Feetech SCS0009 (6V)",
+  "torqueCapNm": 0.2256,
+  "optimizedKeys": [
+    "period",
+    "strideM",
+    "liftM",
+    "standM",
+    "stanceDuty"
+  ],
+  "params": {
+    "mass": 0.15,
+    "period": 0.6,
+    "strideM": 0.109713702678282,
+    "liftM": 0.05924848661445857,
+    "standM": 0.12,
+    "stanceDuty": 0.5
+  },
+  "baseline": {
+    "fitness": 0.1749,
+    "progressM": 0.1749,
+    "feasible": true
+  },
+  "tuned": {
+    "fitness": 0.721,
+    "progressM": 0.721,
+    "feasible": true
+  },
+  "history": [
+    {
+      "gen": 0,
+      "best": 0.3175,
+      "mean": 0.1577,
+      "progressM": 0.3175
+    },
+    {
+      "gen": 1,
+      "best": 0.3014,
+      "mean": 0.1681,
+      "progressM": 0.3014
+    },
+    {
+      "gen": 2,
+      "best": 0.2869,
+      "mean": 0.1996,
+      "progressM": 0.2869
+    },
+    {
+      "gen": 3,
+      "best": 0.2931,
+      "mean": 0.1878,
+      "progressM": 0.2931
+    },
+    {
+      "gen": 4,
+      "best": 0.3912,
+      "mean": 0.2323,
+      "progressM": 0.3912
+    },
+    {
+      "gen": 5,
+      "best": 0.402,
+      "mean": 0.3144,
+      "progressM": 0.402
+    },
+    {
+      "gen": 6,
+      "best": 0.3969,
+      "mean": 0.34,
+      "progressM": 0.3969
+    },
+    {
+      "gen": 7,
+      "best": 0.493,
+      "mean": 0.3736,
+      "progressM": 0.493
+    },
+    {
+      "gen": 8,
+      "best": 0.5784,
+      "mean": 0.3864,
+      "progressM": 0.5784
+    },
+    {
+      "gen": 9,
+      "best": 0.6307,
+      "mean": 0.4818,
+      "progressM": 0.6307
+    },
+    {
+      "gen": 10,
+      "best": 0.6387,
+      "mean": 0.5507,
+      "progressM": 0.6387
+    },
+    {
+      "gen": 11,
+      "best": 0.6965,
+      "mean": 0.5765,
+      "progressM": 0.6965
+    },
+    {
+      "gen": 12,
+      "best": 0.6436,
+      "mean": 0.5373,
+      "progressM": 0.6436
+    },
+    {
+      "gen": 13,
+      "best": 0.6821,
+      "mean": 0.5963,
+      "progressM": 0.6821
+    },
+    {
+      "gen": 14,
+      "best": 0.7084,
+      "mean": 0.6173,
+      "progressM": 0.7084
+    },
+    {
+      "gen": 15,
+      "best": 0.6474,
+      "mean": 0.5584,
+      "progressM": 0.6474
+    },
+    {
+      "gen": 16,
+      "best": 0.6893,
+      "mean": 0.6026,
+      "progressM": 0.6893
+    },
+    {
+      "gen": 17,
+      "best": 0.6833,
+      "mean": 0.5921,
+      "progressM": 0.6833
+    },
+    {
+      "gen": 18,
+      "best": 0.6884,
+      "mean": 0.6084,
+      "progressM": 0.6884
+    },
+    {
+      "gen": 19,
+      "best": 0.7105,
+      "mean": 0.6382,
+      "progressM": 0.7105
+    },
+    {
+      "gen": 20,
+      "best": 0.6906,
+      "mean": 0.6518,
+      "progressM": 0.6906
+    },
+    {
+      "gen": 21,
+      "best": 0.721,
+      "mean": 0.6388,
+      "progressM": 0.721
+    },
+    {
+      "gen": 22,
+      "best": 0.717,
+      "mean": 0.6914,
+      "progressM": 0.717
+    },
+    {
+      "gen": 23,
+      "best": 0.7164,
+      "mean": 0.6668,
+      "progressM": 0.7164
+    }
+  ],
+  "config": {
+    "gens": 24,
+    "popsize": 8,
+    "seed": 1,
+    "sigma": 0.3
+  }
+}

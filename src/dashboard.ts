@@ -71,8 +71,10 @@ interface TunedRecord extends TunedManifestEntry {
 }
 
 // ---- 状態 ----
-let mechId = MECHANISMS[0].id;
-let courseId: CourseId = 'combined';
+// 既定は「小型四足 × SCS0009 × 平地」= 150g 級の安価な四足が cap 内で歩くデモ（箱出しで前進する）。
+// 段差走破（合成コース）を見るには 四足 + STS3215（大型機体）+ tuned を選ぶ。
+let mechId = 'quad';
+let courseId: CourseId = 'flat';
 let motorId = 'scs0009';
 let torqueCapNm = getServo(motorId).stallNm;
 let paramValues: Record<string, number> = defaultParamValues(getMechanism(mechId));

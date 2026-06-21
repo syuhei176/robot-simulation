@@ -1,7 +1,10 @@
 /**
  * 四足機構（Rapier 3D 動的歩行）の Mechanism 実装。
- * `runQuadrupedGait` をラップ。総質量は trunk:leg 比を保ってスケールし、歩容パラメータはライブ調整。
- * 歩容は平地前提のため supportsCourse=false（段差走破は後続段）。
+ * `runQuadrupedGait` をラップ。総質量スライダーは「機体スケール」を兼ねる: 密度一定の相似縮小で
+ * mass ∝ s³（s = (mass/BASE_TOTAL)^(1/3)）とし、脚長・歩容 ∝ s、PD ゲイン ∝ s⁵、横安定化 ∝ s⁴、
+ * substeps ∝ 1/s でスケールする。これで小型・軽量な機体（150g 級）が SCS0009 のトルク上限内で歩け、
+ * 同じダッシュボードで「小型四足×安サーボ」も「大型四足×高トルクサーボ」も評価できる。
+ * s=1（mass=BASE_TOTAL=1.2kg）では全係数が 1 で従来の機体に一致する。
  */
 import {
   runQuadrupedGait,
@@ -12,10 +15,18 @@ import type { CourseSpec } from '../sim3d/course.ts';
 import type { StairDynamicsView } from '../render/StairDynamicsView.ts';
 import type { Mechanism, MechReplay, MechRunCtx, MechScore, StatRow } from './Mechanism.ts';
 
-const BASE_TRUNK = DEFAULT_QUAD_DYN_CONFIG.trunk.mass;
-const BASE_SEG = DEFAULT_QUAD_DYN_CONFIG.leg.segMass;
-const BASE_TOTAL = BASE_TRUNK + 8 * BASE_SEG;
-const G = DEFAULT_QUAD_DYN_CONFIG.gait;
+const D = DEFAULT_QUAD_DYN_CONFIG;
+const BASE_TRUNK = D.trunk.mass;
+const BASE_SEG = D.leg.segMass;
+// スケール基準（s=1 になる質量）。この機体が「基準機体」で、歩容スライダーもこの機体の単位で表す。
+const BASE_TOTAL = BASE_TRUNK + 8 * BASE_SEG; // 1.2kg
+const G = D.gait;
+// ダッシュボード/最適化の既定機体は SCS0009 級の小型四足（150g）。s=(0.15/1.2)^(1/3)=0.5。
+const DEFAULT_MASS = 0.15;
+
+function clamp(x: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, x));
+}
 
 class QuadReplay implements MechReplay {
   readonly duration: number;
@@ -129,13 +140,14 @@ export const quadMechanism: Mechanism = {
   params: [
     {
       key: 'mass',
-      label: '総質量',
-      min: 0.8,
+      label: '総質量(機体スケール)',
+      min: 0.1,
       max: 2.5,
       step: 0.05,
-      default: BASE_TOTAL,
+      default: DEFAULT_MASS,
       unit: 'kg',
-      // 機体設計の選択であって歩容の制御量ではない。歩容最適化中は既定値に固定。
+      // 機体設計の選択であって歩容の制御量ではない。歩容最適化中は既定値に固定（--mass で上書き可）。
+      // 密度一定の相似縮小で機体スケール s=(mass/BASE_TOTAL)^(1/3) を兼ねる（脚長・PD 等が連動）。
       optimize: false,
     },
     {
@@ -177,25 +189,53 @@ export const quadMechanism: Mechanism = {
     { key: 'stanceDuty', label: '接地比', min: 0.5, max: 0.9, step: 0.05, default: G.stanceDuty },
   ],
   async run(ctx: MechRunCtx): Promise<MechReplay> {
-    const massFactor = ctx.params.mass / BASE_TOTAL;
+    // 機体スケール s（密度一定の相似縮小: mass ∝ s³）。s=1 で基準機体（回帰）。
+    const s = Math.cbrt(ctx.params.mass / BASE_TOTAL);
+    const s3 = s * s * s; // 質量・慣性体積 ∝ s³
+    const s4 = s3 * s; // 重力トルク ∝ s⁴ → 横安定化ゲインを合わせる
+    const s5 = s4 * s; // 関節慣性 I ∝ s⁵。PD を k ∝ I にすると ω=√(k/I) 一定で陽解法の安定余裕が
+    //                    スケール不変になり、軽い機体でも飽和・発散しない（s⁴/s³ は発散する＝実測）。
+    const sqrtS = Math.sqrt(s); // 動的相似（Froude）: 時間 ∝ √s。歩容周期を縮めて前進を稼ぐ。
+    // 小さい機体ほど陽解法の安定化に substeps を要する（s=0.5→16, s=1→8）。
+    const substeps = clamp(Math.round(D.substeps / s), D.substeps, 24);
     // 地形のあるコースは端まで歩くのに時間が要るので、ゴールまでの距離に応じて duration を伸ばす
     // （平地は従来どおり既定 5s でトルク/前進を測る回帰互換）。
     const duration =
       ctx.course.stepRise > 0
         ? Math.min(32, Math.max(8, (ctx.course.goalX + 0.8) / 0.08 + 4))
-        : DEFAULT_QUAD_DYN_CONFIG.duration;
+        : D.duration;
     const replay = await runQuadrupedGait(
       {
         course: ctx.course,
         duration,
-        trunk: { mass: BASE_TRUNK * massFactor },
-        leg: { segMass: BASE_SEG * massFactor },
-        motor: { maxTorqueNm: ctx.torqueCapNm },
+        substeps,
+        trunk: {
+          length: D.trunk.length * s,
+          width: D.trunk.width * s,
+          height: D.trunk.height * s,
+          mass: D.trunk.mass * s3,
+        },
+        leg: {
+          thigh: D.leg.thigh * s,
+          shin: D.leg.shin * s,
+          segMass: D.leg.segMass * s3,
+          radius: D.leg.radius * s,
+        },
+        hipInset: D.hipInset * s,
+        motor: {
+          stiffness: D.motor.stiffness * s5,
+          damping: D.motor.damping * s5,
+          passiveDamping: D.motor.passiveDamping * s5,
+          maxTorqueNm: ctx.torqueCapNm,
+        },
+        lateralStabK: D.lateralStabK * s4,
+        lateralStabD: D.lateralStabD * s4,
+        // 歩容スライダーは基準機体(1.2kg)の単位。機体スケール s で幾何相似に縮める（長さ ∝ s, 周期 ∝ √s）。
         gait: {
-          period: ctx.params.period,
-          strideM: ctx.params.strideM,
-          liftM: ctx.params.liftM,
-          standM: ctx.params.standM,
+          period: ctx.params.period * sqrtS,
+          strideM: ctx.params.strideM * s,
+          liftM: ctx.params.liftM * s,
+          standM: ctx.params.standM * s,
           stanceDuty: ctx.params.stanceDuty,
         },
       },

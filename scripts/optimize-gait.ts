@@ -2,7 +2,8 @@
 /**
  * オフライン歩容最適化（Mac / Node ヘッドレス Rapier）。
  *   実行例:
- *     node scripts/optimize-gait.ts --mech quad --motor sts3215 --gens 20
+ *     node scripts/optimize-gait.ts --mech quad --course flat --motor scs0009   # 小型四足(既定150g)
+ *     node scripts/optimize-gait.ts --mech quad --motor sts3215 --mass 1.2      # 大型四足
  *     node scripts/optimize-gait.ts --mech snake --course stairs --motor sts3215
  *
  * 機構（Mechanism）の歩容パラメータ（= ダッシュボードのスライダーと同じ key のうち
@@ -34,6 +35,7 @@ interface Options {
   seed: number;
   sigma: number;
   params: string[] | null; // 明示指定（null = optimize!==false の全 param）
+  mass: number | null; // 機体質量（=スケール）の上書き。null = 機構の既定（quad は 150g）
 }
 
 function parseArgs(argv: string[]): Options {
@@ -46,6 +48,7 @@ function parseArgs(argv: string[]): Options {
     seed: 1,
     sigma: 0.3,
     params: null,
+    mass: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -77,6 +80,9 @@ function parseArgs(argv: string[]): Options {
         break;
       case 'params':
         opts.params = val.split(',').map((s) => s.trim());
+        break;
+      case 'mass':
+        opts.mass = Number(val);
         break;
       default:
         throw new Error(`未知のオプション --${key}`);
@@ -361,6 +367,8 @@ async function main(): Promise<void> {
   const dims: Dim[] = selected.map((p) => ({ key: p.key, min: p.min, max: p.max }));
 
   const fixed = defaultParamValues(mech); // 非探索 param は既定値で固定
+  // 機体質量（=スケール）の上書き。mass は optimize=false なので探索されず、この固定値で全評価される。
+  if (opts.mass !== null && 'mass' in fixed) fixed.mass = opts.mass;
   const lambda = opts.popsize ?? 4 + Math.floor(3 * Math.log(dims.length));
 
   const evaluate = async (paramOverrides: Record<string, number>) => {

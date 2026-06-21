@@ -16,6 +16,10 @@
   追従不能・滑り・落下・縁越えを実際に起こす。`pnpm stair-dynamics`
 - **四足 3D 動的歩行** — IK クロール歩容を「忠実トルク（PD を ±ストールで clamp）」で駆動。
   cap→前進距離が単調・総質量に応答するので、**重さ × サーボ** で歩ける/失速するを判定できる。`pnpm quadruped`
+- **機体スケール連動（小型四足 × 安サーボ）** — 総質量スライダーが**機体スケール** s も兼ねる（密度一定の相似縮小:
+  mass ∝ s³, 脚長・歩容 ∝ s, PD ゲイン ∝ s⁵, 横安定化 ∝ s⁴, substeps ∝ 1/s）。これで **150g 級の小型四足が
+  SCS0009（実売 ~700円）のトルク上限内**で平地を歩く（要求 ~0.09 N·m ≤ cap 0.226・飽和なし）。大型機体は
+  STS3215、小型機体は SCS0009、と同じダッシュボードで端から端まで評価できる。s=1（1.2kg）で従来機体に一致。
 - **統合ダッシュボード** — `index.html` で **機構（蛇/四足）× コース（階段/低い階段/小障害物/合成/平地）× モーター × 歩容パラメータ** を
   1画面で切り替えて挙動を再生。新機構は `src/mech` に `Mechanism` を1つ足すだけで現れる。
 - **共通Map（合成コース）+ 四足の地形適応歩容** — 1つのコースに「平地→障害物→階段」を直列に並べた
@@ -42,6 +46,8 @@ pnpm dev          # http://localhost:5173
   - 蛇＝コース physical attempt（赤: 落下/干渉、オレンジ: トルク超過、黄: 滑り、水色: 支持接触）。コース選択で階段/低い階段/小障害物/合成/平地を切替。
   - 四足＝3D 動的歩行（モーター選択で τ上限を自動設定、歩容スライダーで period/stride/lift 等を調整）。
     **地形適応歩容**でコースを選べる（合成コースは障害物＋低い階段を走破。高い段は転倒する）。
+    **総質量スライダーが機体スケールを兼ねる**: 既定は 150g の小型四足 × SCS0009 で平地を歩くデモ。
+    質量を上げると機体ごと大きくなり要求トルクが増える（合成コース走破は STS3215 + 大型機体 + tuned）。
   - **scripted / tuned 切替** … `pnpm optimize-gait` の最適化結果（`public/tuned/`）がある 機構×コース×モーター で
     tuned ボタンが有効になり、調整済み歩容＋改善カーブを再生する。
 - `http://localhost:5173/playground.html` … 平面蛇型の歩容学習（手動 CPG / PPO）デモ
@@ -58,8 +64,9 @@ pnpm optimize-gait  # 歩容を CMA-ES でオフライン最適化 → public/tu
 `optimize-gait` の主なオプション（既定: `--mech quad --course stairs --motor sts3215 --gens 20 --seed 1`）:
 
 ```bash
-pnpm optimize-gait --mech quad  --motor sts3215            # 四足の歩容（period/stride/lift/stand/duty）を平地で最適化
-pnpm optimize-gait --mech snake --course lowStairs         # 蛇の歩容（referenceSpeed/clearance）を低い階段で最適化
+pnpm optimize-gait --mech quad  --course flat --motor scs0009   # 小型四足(既定150g)の歩容を平地で最適化
+pnpm optimize-gait --mech quad  --motor sts3215 --mass 1.2      # 大型四足(--massで機体スケール上書き)を階段で最適化
+pnpm optimize-gait --mech snake --course lowStairs              # 蛇の歩容（referenceSpeed/clearance）を低い階段で最適化
 pnpm sanity         # 平面物理: CPG 駆動で前進・数値安定を確認
 pnpm rl-smoke       # 平面 RL: 数イテレーションで学習が伸びる/NaN なしを確認
 pnpm quality-check  # lint + format:check + type-check
