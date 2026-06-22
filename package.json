@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.19.3",
+    "@mujoco/mujoco": "^3.9.0",
     "@tensorflow/tfjs": "^4.22.0",
     "three": "^0.169.0"
   },

@@ -42,6 +42,12 @@ export class StairDynamicsView {
     lz: number;
     foot: boolean;
   }> = [];
+  // 3D 蛇（MuJoCo）。z-up→y-up の group にカプセルを並べる。移動が分かるよう軌跡(trail)＋距離目盛り＋開始マーカーを置く。
+  private readonly snake3dGroup = new THREE.Group();
+  private readonly snake3dMeshes: THREE.Mesh[] = [];
+  private readonly snake3dMaterials: THREE.MeshStandardMaterial[] = [];
+  private readonly snake3dDecor = new THREE.Group(); // trail / 目盛り / 開始マーカー（group 配下＝z-up）
+  private snake3dHeadDot: THREE.Mesh | null = null;
   private readonly tmpVec = new THREE.Vector3();
   private readonly tmpQuat = new THREE.Quaternion();
   private readonly followTarget = new THREE.Vector3();
@@ -68,6 +74,10 @@ export class StairDynamicsView {
 
     this.scene.add(this.quadGroup);
     this.quadGroup.visible = false;
+    this.snake3dGroup.rotation.x = -Math.PI / 2; // sim z-up → three y-up
+    this.snake3dGroup.add(this.snake3dDecor);
+    this.scene.add(this.snake3dGroup);
+    this.snake3dGroup.visible = false;
 
     this.buildEnvironment();
     this.buildCourse();
@@ -91,16 +101,143 @@ export class StairDynamicsView {
     this.resize();
   }
 
-  /** 蛇（階段リプレイ）と四足（動的歩行リプレイ）の表示を切り替える。 */
-  setMechanism(mechanism: 'snake' | 'quad'): void {
-    const snake = mechanism === 'snake';
-    for (const link of this.links) link.visible = snake;
-    this.stairs.visible = snake;
-    this.quadGroup.visible = !snake;
-    if (!snake) {
+  /** 蛇(2D階段) / 四足 / 3D蛇(MuJoCo) の表示を切り替える。 */
+  setMechanism(mechanism: 'snake' | 'quad' | 'snake3d'): void {
+    const snake2d = mechanism === 'snake';
+    const quad = mechanism === 'quad';
+    const snake3d = mechanism === 'snake3d';
+    for (const link of this.links) link.visible = snake2d;
+    this.stairs.visible = snake2d || quad;
+    this.quadGroup.visible = quad;
+    this.snake3dGroup.visible = snake3d;
+    if (quad) {
       this.controls.target.set(0.05, 0.11, 0);
       this.camera.position.set(0.18, 0.34, 0.66);
+    } else if (snake3d) {
+      this.stairs.visible = false;
+      this.controls.target.set(0, 0.05, 0);
+      this.camera.position.set(0.1, 0.5, 0.9);
     }
+  }
+
+  /**
+   * 3D 蛇（MuJoCo）のカプセルリンクを layout から構築する。group は z-up→y-up 済みなので
+   * 子はシム座標(p,q)のまま置ける。カプセルは three では Y 軸長手なので Z まわり 90° で X 長手にする。
+   */
+  buildSnake3D(layout: Array<{ half: [number, number, number] }>): void {
+    this.snake3dGroup.clear(); // decor 含め全消去 → decor を付け直す
+    this.snake3dDecor.clear();
+    this.snake3dGroup.add(this.snake3dDecor);
+    this.snake3dMeshes.length = 0;
+    this.snake3dMaterials.length = 0;
+    this.snake3dHeadDot = null;
+    for (let i = 0; i < layout.length; i++) {
+      const half = layout[i].half;
+      const radius = half[1];
+      const cylLen = Math.max(0.001, half[0] * 2 - radius * 2);
+      const geom = new THREE.CapsuleGeometry(radius, cylLen, 6, 12);
+      geom.rotateZ(Math.PI / 2); // 長手を local x へ
+      const isHead = i === layout.length - 1;
+      const material = new THREE.MeshStandardMaterial({
+        color: isHead ? HEAD_COLOR : LINK_COLOR,
+        roughness: 0.42,
+        metalness: 0.34,
+        emissive: isHead ? 0x3a1e00 : 0x002a31,
+        emissiveIntensity: isHead ? 0.4 : 0.2,
+      });
+      const mesh = new THREE.Mesh(geom, material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      this.snake3dGroup.add(mesh);
+      this.snake3dMeshes.push(mesh);
+      this.snake3dMaterials.push(material);
+    }
+  }
+
+  /**
+   * 移動が一目で分かるよう、頭の全軌跡(trail)・開始マーカー・床の距離目盛り(0.25m毎)を置く。
+   * 引数は各フレームの頭位置（シム座標 [x,y,z]）。group 配下なので z-up のまま。
+   */
+  setSnake3DTrail(headPts: Array<[number, number, number]>): void {
+    this.snake3dDecor.clear();
+    this.snake3dHeadDot = null;
+    if (headPts.length === 0) return;
+
+    // 軌跡ライン（床すれすれ）。
+    const pts = headPts.map((p) => new THREE.Vector3(p[0], p[1], 0.002));
+    const trail = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0x35c8ff, transparent: true, opacity: 0.85 }),
+    );
+    this.snake3dDecor.add(trail);
+
+    // 開始マーカー（リング）。
+    const start = new THREE.Mesh(
+      new THREE.RingGeometry(0.012, 0.022, 20),
+      new THREE.MeshBasicMaterial({ color: 0xf2a33a, side: THREE.DoubleSide }),
+    );
+    start.position.set(headPts[0][0], headPts[0][1], 0.003);
+    this.snake3dDecor.add(start);
+
+    // 距離目盛り（x 方向 0.25m 毎の横線）。軌跡の x 範囲を覆う。
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (const p of headPts) {
+      minX = Math.min(minX, p[0]);
+      maxX = Math.max(maxX, p[0]);
+    }
+    const tickMat = new THREE.LineBasicMaterial({
+      color: 0x4c5560,
+      transparent: true,
+      opacity: 0.6,
+    });
+    const lo = Math.floor(minX / 0.25) * 0.25;
+    const hi = Math.ceil(maxX / 0.25) * 0.25;
+    for (let x = lo; x <= hi + 1e-9; x += 0.25) {
+      const tick = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(x, -0.15, 0.001),
+          new THREE.Vector3(x, 0.15, 0.001),
+        ]),
+        tickMat,
+      );
+      this.snake3dDecor.add(tick);
+    }
+
+    // 頭の現在位置ドット（毎フレーム更新）。
+    const dot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.012, 12, 10),
+      new THREE.MeshBasicMaterial({ color: 0x35c8ff }),
+    );
+    this.snake3dDecor.add(dot);
+    this.snake3dHeadDot = dot;
+  }
+
+  /** 3D 蛇の1フレーム（各リンクのシム座標 p,q）を適用し、頭を上空から追従する（移動が見えるよう少し引く）。 */
+  applySnake3DFrame(frame: {
+    bodies: Array<{ p: [number, number, number]; q: [number, number, number, number] }>;
+  }): void {
+    let cx = 0;
+    let cy = 0;
+    const meshN = this.snake3dMeshes.length;
+    for (let i = 0; i < meshN; i++) {
+      const b = frame.bodies[i];
+      if (!b) continue;
+      this.snake3dMeshes[i].position.set(b.p[0], b.p[1], b.p[2]);
+      this.snake3dMeshes[i].quaternion.set(b.q[0], b.q[1], b.q[2], b.q[3]);
+      cx += b.p[0];
+      cy += b.p[1];
+    }
+    const n = meshN || 1;
+    cx /= n;
+    cy /= n;
+    const head = frame.bodies[meshN - 1];
+    if (this.snake3dHeadDot && head) this.snake3dHeadDot.position.set(head.p[0], head.p[1], 0.004);
+    // sim(x,y,z)→three(x, z, -y)。少し上空＆後方から俯瞰して軌跡が見えるようにする。
+    this.followTarget.set(cx, 0.02, -cy);
+    this.desiredCamera.set(cx + 0.1, 0.85, -cy + 1.0);
+    this.controls.target.lerp(this.followTarget, 0.08);
+    this.camera.position.lerp(this.desiredCamera, 0.08);
   }
 
   /**

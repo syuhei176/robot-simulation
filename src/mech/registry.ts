@@ -1,6 +1,7 @@
 /** 機構レジストリ。新機構はここに足すだけで統合ダッシュボードに現れる。 */
 import type { Mechanism } from './Mechanism.ts';
 import { snakeMechanism } from './snake.ts';
+import { snake3dMechanism } from './snake3d.ts';
 import { quadMechanism } from './quad.ts';
 import { multipedMechanism } from './multiped.ts';
 import { urchinMechanism } from './urchin.ts';
@@ -8,6 +9,7 @@ import { spokeUrchinMechanism } from './spoke-urchin.ts';
 
 export const MECHANISMS: Mechanism[] = [
   snakeMechanism,
+  snake3dMechanism,
   quadMechanism,
   multipedMechanism,
   urchinMechanism,
