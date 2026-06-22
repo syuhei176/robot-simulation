@@ -39,6 +39,10 @@ export interface SnakeEnvConfig {
   episodeSteps: number; // 1 エピソードの制御ステップ数
   controlFrames: number; // 1 制御ステップが含む sim.dt フレーム数（制御周期 = controlFrames·dt）
   maxJointDelta: number; // 関節残差の可動幅 [rad]（土台ターゲット中心の ±）
+  // 操舵行動のスケール [rad]: 方策の最後の行動次元（曲率指令）を ±steerActionScale·tanh(a) の yaw 定常バイアスへ
+  // 写像し、全 yaw 関節へ一律加算する。これで方策は「目標方位に応じて体をどれだけ曲げるか」を残差とは独立に学べる
+  //（関節残差 ±maxJointDelta では操舵に必要な ~0.2rad を出すとうねりの余地が無くなるため、操舵は専用次元に分離）。
+  steerActionScale: number;
   headingMaxRad: number; // 目標ヘディングのランダム化範囲 ±[rad]（操舵の学習。0 なら常に直進=+x）
   headYawEmaTau: number; // 頭IMU yaw の EMA フィルタ時定数 [s]（うねりの振動を均して走行方位を推定）
   forwardReward: number; // 指令方向への前進量への係数
@@ -72,6 +76,9 @@ export function defaultSnakeEnvConfig(overrides: Partial<Snake3DConfig> = {}): S
     // 残差幅。残差RLは action=0 で良い基盤（前進）なので、必要なのは段越えの追加動作と操舵補正だけ。
     // 幅を絞ると方策が基盤から大きく逸脱できず、学習の「床」が基盤付近に保たれて崩壊（後退）しにくい。
     maxJointDelta: 0.2,
+    // 操舵行動のスケール。実測校正（手動）で yaw 定常バイアス 0.22rad で明確に曲がり 0.45rad で巻き込む。
+    // 余裕を持って ±0.3rad を上限に与え、方策は前進報酬とのトレードオフで必要なぶんだけ使う（直進時は ~0）。
+    steerActionScale: 0.3,
     headingMaxRad: 0.5236, // ±30°。エピソード毎に目標方位を一様サンプル（θ≈0 も含み「直進時は操舵しない」を学ぶ）
     headYawEmaTau: 0.6, // ≈半歩容周期。頭yawはうねりで±30°超振れるので均して平均方位を取り出す
     forwardReward: 20,
@@ -154,6 +161,9 @@ export class SnakeEnv implements RLEnv {
   private cmdHeadingRad = 0;
   private cmdDirX = 1;
   private cmdDirY = 0;
+  // 操舵の yaw 定常バイアス [rad]。yaw 関節の土台ターゲットへ一律加算して体を一定曲率で曲げる。
+  // 毎ステップ方策の操舵行動（最後の行動次元）から設定される＝曲がる動きを RL が獲得する（外部からは与えない）。
+  private yawSteerBias = 0;
   private yawEmaCos = 1; // 頭yaw を単位ベクトルで EMA（角度のラップ回避）
   private yawEmaSin = 0;
   private prevHeadQuat: Quat = [0, 0, 0, 1]; // ジャイロ（角速度）算出用の前ステップ頭姿勢
@@ -194,12 +204,13 @@ export class SnakeEnv implements RLEnv {
     this.activeTerrain = this.terrains[0];
     this.data = new mj.MjData(this.model);
 
-    this.actDim = this.nJoints; // 各関節の歩容残差
+    // 行動 = 各関節の歩容残差(nJoints) ＋ 操舵（yaw 曲率）1次元。最後の次元が目標方位に応じた曲げ量を担う。
+    this.actDim = this.nJoints + 1;
     // 観測（実機相当）: 関節角(nJoints)+関節速度(nJoints)+関節負荷(nJoints)
     //   +頭IMU姿勢[fwd xy, pitch, roll](4)+頭IMUジャイロ(3)+位相(2)+目標ヘディング誤差 sin/cos(2)。
     this.obsDim = 3 * this.nJoints + 11;
     this.obs = new Float32Array(this.obsDim);
-    this.residual = new Float64Array(this.actDim);
+    this.residual = new Float64Array(this.nJoints);
     this.jointTau = new Float64Array(this.nJoints);
     this.prevPos = Array.from({ length: this.n }, () => [0, 0, 0] as [number, number, number]);
   }
@@ -217,6 +228,37 @@ export class SnakeEnv implements RLEnv {
 
   get maxSteps(): number {
     return this.cfg.episodeSteps;
+  }
+
+  /**
+   * 実行中に目標ヘディング指令（相対方位）を差し替える（ライブ操舵用）。reset 時のみだった設定を
+   * エピソードの途中でも更新できるようにする。観測の「目標ヘディング誤差」が即座に変わるので、
+   * 次ステップから方策が新しい方位へ操舵し直す。報酬の指令座標系も追従する（ライブ再生では未使用）。
+   */
+  setCommandHeading(rad: number): void {
+    this.cmdHeadingRad = rad;
+    this.cmdDirX = Math.cos(rad);
+    this.cmdDirY = Math.sin(rad);
+  }
+
+  /** 各リンクのカプセル寸法（ライブ描画でビューを組むのに使う）。 */
+  getLayout(): SnakeBodyLayout[] {
+    return this.layout;
+  }
+
+  /** 現在の各リンク姿勢（ライブ描画用・`SnakeFrame['bodies']` と同形）。 */
+  currentBodies(): SnakeFrame['bodies'] {
+    const xpos = this.data.xpos;
+    const xquat = this.data.xquat;
+    const bodies: SnakeFrame['bodies'] = [];
+    for (let i = 0; i < this.n; i++) {
+      const bid = this.bodyId(i);
+      bodies.push({
+        p: [xpos[bid * 3], xpos[bid * 3 + 1], xpos[bid * 3 + 2]],
+        q: [xquat[bid * 4 + 1], xquat[bid * 4 + 2], xquat[bid * 4 + 3], xquat[bid * 4]],
+      });
+    }
+    return bodies;
   }
 
   private bodyId(link: number): number {
@@ -288,6 +330,7 @@ export class SnakeEnv implements RLEnv {
     this.simSubstep = 0;
     this.stepCount = 0;
     this.residual.fill(0);
+    this.yawSteerBias = 0;
     this.jointTau.fill(0);
 
     // 頭IMU 派生状態の初期化: yaw EMA を初期 yaw に、ジャイロ用の前姿勢を現姿勢に。
@@ -338,23 +381,27 @@ export class SnakeEnv implements RLEnv {
     };
   }
 
-  /** 関節 j の土台ターゲット（残差を足す前のセルペノイド波）。runSnake3D の歩容と同式。 */
+  /** 関節 j の土台ターゲット（残差を足す前のセルペノイド波）。runSnake3D の歩容と同式＋yaw 操舵バイアス。 */
   private baseTarget(j: number, ts: number): number {
     const isYaw = this.axes[j] === 'yaw';
     const amp = isYaw ? this.sim.yawAmp : this.sim.pitchAmp;
     const phase = isYaw ? 0 : this.sim.yawPitchPhase;
+    const bias = isYaw ? this.yawSteerBias : 0; // yaw 関節へ一律オフセット＝方策の操舵行動が与える一定曲率
     return (
       amp *
-      Math.sin(
-        (2 * Math.PI * ts) / this.sim.period - this.sim.waveSign * j * this.spatialPhase + phase,
-      )
+        Math.sin(
+          (2 * Math.PI * ts) / this.sim.period - this.sim.waveSign * j * this.spatialPhase + phase,
+        ) +
+      bias
     );
   }
 
   step(action: ArrayLike<number>): StepResult {
-    for (let j = 0; j < this.actDim; j++) {
+    // 前 nJoints は各関節の歩容残差、最後の1次元は操舵（yaw 曲率）。
+    for (let j = 0; j < this.nJoints; j++) {
       this.residual[j] = this.cfg.maxJointDelta * tanh(action[j] ?? 0);
     }
+    this.yawSteerBias = this.cfg.steerActionScale * tanh(action[this.nJoints] ?? 0);
 
     let stepDemand = 0;
     let stepApplied = 0;
@@ -438,12 +485,13 @@ export class SnakeEnv implements RLEnv {
     const forwardProj = dx * this.cmdDirX + dy * this.cmdDirY; // 指令方向への前進
     const lateralProj = -dx * this.cmdDirY + dy * this.cmdDirX; // 指令直交（横ずれ速度）
 
+    // エネルギー罰は関節残差のみ（操舵行動は罰さない＝曲がることをコストにしない）。
     let energy = 0;
-    for (let j = 0; j < this.actDim; j++) {
+    for (let j = 0; j < this.nJoints; j++) {
       const a = tanh(action[j] ?? 0);
       energy += a * a;
     }
-    energy /= this.actDim;
+    energy /= this.nJoints;
     const satFrac = satSamples > 0 ? satCount / satSamples : 0;
 
     // 指令光線（開始点を通る方位線）からの横ずれ＝追従誤差の積分。上限付き（暴走防止）。

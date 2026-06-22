@@ -11,6 +11,8 @@ import { COURSES, COURSE_OPTIONS, type CourseId } from './sim3d/course.ts';
 import { MECHANISMS, getMechanism } from './mech/registry.ts';
 import { recordedSnake3DReplay } from './mech/snake3d.ts';
 import type { Snake3DReplay } from './sim3d/snake3d-dynamics.ts';
+import { SnakeEnv, defaultSnakeEnvConfig } from './env/SnakeEnv.ts';
+import { makePolicyForward } from './rl/policyForward.ts';
 import {
   defaultParamValues,
   type MechParam,
@@ -46,10 +48,11 @@ const statsBox = el<HTMLDivElement>('stats');
 const mechSubtitle = el<HTMLDivElement>('mech-subtitle');
 const btnScripted = el<HTMLButtonElement>('btn-scripted');
 const btnRL = el<HTMLButtonElement>('btn-rl');
+const btnLive = el<HTMLButtonElement>('btn-live');
 const tunedInfo = el<HTMLDivElement>('tuned-info');
 const linkMaterials = el<HTMLAnchorElement>('link-materials');
 const courseRow = selCourse.parentElement as HTMLDivElement; // sel-course を含む .row
-const headingCtl = el<HTMLDivElement>('heading-ctl'); // 操舵スライダーの容れ物（RL モードのみ表示）
+const headingCtl = el<HTMLDivElement>('heading-ctl'); // 操舵スライダーの容れ物（RL/ライブ モードで表示）
 const headingInput = el<HTMLInputElement>('s-heading');
 const headingValue = el<HTMLSpanElement>('v-heading');
 
@@ -62,6 +65,7 @@ interface PolicyManifestEntry {
   motor: string;
   mass: number;
   base: string;
+  policy?: string; // 学習方策の種別。'general' ならコース汎用の単一重み（ライブ駆動に使える）
   forwardM: number;
   baseForwardM?: number; // 基盤歩容（残差0）の前進量。あれば「基盤→RL」の上乗せを表示する
   cmdHeadingDeg?: number; // 目標ヘディング指令（操舵）[deg]。無ければ 0（直進）扱い
@@ -73,8 +77,18 @@ interface PolicyReplayFile {
   meta: PolicyManifestEntry;
   replay: Snake3DReplay;
 }
+/** public/policies/<stem>.json（重み JSON・ライブ方策フォワード用）。 */
+interface PolicyWeightsFile {
+  obsDim: number;
+  actDim: number;
+  hidden: number;
+  weights: { policy: number[][]; value: number[][]; logStd: number[] };
+}
 
-type MotionMode = 'scripted' | 'rl';
+// scripted=基盤歩容のライブ実行 / rl=録画リプレイ再生 / live=方策をブラウザ内でリアルタイム駆動。
+type MotionMode = 'scripted' | 'rl' | 'live';
+
+const DEG = Math.PI / 180;
 
 // 本プロジェクトは MuJoCo 蛇（snake3d）専用。registry は snake3d のみだが、将来の拡張に備え一覧から生成する。
 const UI_MECHANISMS = MECHANISMS;
@@ -85,7 +99,7 @@ const UI_MECHANISMS = MECHANISMS;
 let mechId = UI_MECHANISMS[0].id;
 let courseId: CourseId = 'challenge';
 let motorId = 'mg996r';
-let commandHeadingDeg = 0; // RL 方策に与える目標方位（操舵）。最近傍の録画方位を再生する
+let commandHeadingDeg = 0; // 方策に与える目標方位（操舵）。RL=最近傍の録画方位を再生 / ライブ=連続で即操舵
 let torqueCapNm = getServo(motorId).stallNm;
 let paramValues: Record<string, number> = defaultParamValues(getMechanism(mechId));
 let replay: MechReplay | null = null;
@@ -97,6 +111,18 @@ let lastTimestamp: number | null = null;
 let policyManifest: PolicyManifestEntry[] = [];
 let motionMode: MotionMode = 'scripted';
 const policyCache = new Map<string, PolicyReplayFile>();
+const weightsCache = new Map<string, PolicyWeightsFile>();
+
+// ---- ライブ操舵（方策をブラウザ内でリアルタイムに 1 ステップずつ駆動）の状態 ----
+// 録画再生(replay)とは別経路。SnakeEnv をブラウザ内に1つ持ち、毎フレーム制御周期ぶん step して
+// 現在姿勢をビューへ流す。目標方位スライダーは env.setCommandHeading でライブに反映される。
+let liveEnv: SnakeEnv | null = null;
+let liveForward: ((obs: ArrayLike<number>) => Float32Array) | null = null;
+let liveObs: Float32Array = new Float32Array(0);
+let liveAccum = 0; // 実時間→制御ステップの蓄積（controlPeriod 毎に1ステップ進める）
+let liveStartProj = 0; // エピソード開始時の指令方向射影（前進量表示の基準）
+let liveStatsThrottle = 0;
+const MAX_LIVE_STEPS_PER_FRAME = 3; // 1フレームで進める制御ステップ上限（重い時の暴走防止）
 // scripted 物理計算は決定論的（同じ 機構×コース×モーター×cap×params なら同結果）だが、
 // メインスレッドで数秒かかる。結果を入力キーでメモ化し、過去に見た構成への再選択を即時化する。
 // frames が嵩むので LRU（最古を退避）で上限を設ける。
@@ -239,17 +265,62 @@ async function loadPolicyReplay(entry: PolicyManifestEntry): Promise<PolicyRepla
   return record;
 }
 
-/** scripted/RL ボタンの有効/無効と選択状態を同期する（RL が無いコースを選んでいたら scripted に戻す）。 */
+/** ライブ駆動に使えるコース汎用方策（単一重み）の manifest エントリ。無ければ null。 */
+function generalPolicyEntry(): PolicyManifestEntry | null {
+  return (
+    policyManifest.find(
+      (e) => e.mechanism === mechId && e.motor === motorId && e.policy === 'general',
+    ) ?? null
+  );
+}
+
+/** ライブ方策の重み JSON を取得（fetch はキャッシュ）。決定論フォワードに渡す。 */
+async function loadPolicyWeights(stem: string): Promise<PolicyWeightsFile> {
+  const cached = weightsCache.get(stem);
+  if (cached) return cached;
+  const res = await fetch(`./policies/${stem}.json`);
+  if (!res.ok) throw new Error(`方策の重みを取得できません: ${stem}`);
+  const file = (await res.json()) as PolicyWeightsFile;
+  weightsCache.set(stem, file);
+  return file;
+}
+
+/** 目標方位スライダーをモードに合わせて構成（RL=録画方位に量子化 / ライブ=連続）。 */
+function syncHeadingSlider(): void {
+  if (motionMode === 'live') {
+    // ライブは連続操舵（±30°・1° 刻み）。スライダーを動かすと即座に方位指令が変わる。
+    headingInput.min = '-30';
+    headingInput.max = '30';
+    headingInput.step = '1';
+    commandHeadingDeg = Math.max(-30, Math.min(30, Math.round(commandHeadingDeg)));
+  } else {
+    // RL は録画済みの離散方位（±25°・5° 刻み）の最近傍を再生する。
+    headingInput.min = '-25';
+    headingInput.max = '25';
+    headingInput.step = '5';
+    commandHeadingDeg = Math.max(-25, Math.min(25, Math.round(commandHeadingDeg / 5) * 5));
+  }
+  headingInput.value = String(commandHeadingDeg);
+  headingValue.textContent = `${commandHeadingDeg > 0 ? '+' : ''}${commandHeadingDeg}°`;
+}
+
+/** scripted/RL/ライブ ボタンの有効/無効と選択状態を同期する（成果物が無いモードは scripted に戻す）。 */
 function updateModeAvailability(): void {
-  const hasPolicy = findPolicyEntries().length > 0;
+  const hasPolicy = findPolicyEntries().length > 0; // 選択コースの録画リプレイ（RL 再生）
+  const hasLive = generalPolicyEntry() !== null; // コース汎用の重み（ライブ駆動）
   btnRL.disabled = !hasPolicy;
+  btnLive.disabled = !hasLive;
   if (motionMode === 'rl' && !hasPolicy) motionMode = 'scripted';
+  if (motionMode === 'live' && !hasLive) motionMode = 'scripted';
   btnScripted.classList.toggle('active', motionMode === 'scripted');
   btnRL.classList.toggle('active', motionMode === 'rl');
-  // 操舵スライダーは RL 方策があり RL モードの時だけ表示（基盤歩容は +x のみで操舵できない）。
-  headingCtl.style.display = motionMode === 'rl' && hasPolicy ? '' : 'none';
-  headingValue.textContent = `${commandHeadingDeg > 0 ? '+' : ''}${commandHeadingDeg}°`;
-  headingInput.value = String(commandHeadingDeg);
+  btnLive.classList.toggle('active', motionMode === 'live');
+  // 操舵スライダーは方策がある RL/ライブ モードの時だけ表示（基盤歩容は +x のみで操舵できない）。
+  const showHeading = (motionMode === 'rl' && hasPolicy) || (motionMode === 'live' && hasLive);
+  headingCtl.style.display = showHeading ? '' : 'none';
+  // 再生位置スライダーはライブでは無効（録画ではないのでシークできない）。
+  progress.disabled = motionMode === 'live';
+  syncHeadingSlider();
 }
 
 function syncTorqueUI(): void {
@@ -383,11 +454,136 @@ async function runRL(): Promise<void> {
   applyReplay(rl);
 }
 
-// ---- 選択変更の共通経路: モード可否を更新し、scripted（基盤歩容）/RL に応じて再計算 ----
+// ---- ライブ操舵: 方策をブラウザ内 SnakeEnv でリアルタイム駆動（録画再生ではない） ----
+/** ライブ用の SnakeEnv を破棄する（モード離脱・コース/モーター変更時）。 */
+function stopLive(): void {
+  if (liveEnv) {
+    liveEnv.dispose();
+    liveEnv = null;
+  }
+  liveForward = null;
+}
+
+/** ライブのエピソードを初期化（現在の目標方位で reset し前進量の基準を取り直す）。 */
+function resetLiveEpisode(): void {
+  if (!liveEnv) return;
+  liveObs = liveEnv.reset(undefined, commandHeadingDeg * DEG);
+  liveAccum = 0;
+  liveStartProj = liveEnv.progressMetric();
+}
+
+/** ライブの統計行（モード・目標方位・指令方向への前進）。 */
+function liveStatsRows(): StatRow[] {
+  const fwd = liveEnv ? (liveEnv.progressMetric() - liveStartProj) * 100 : 0;
+  return [
+    { label: 'モード', value: 'ライブ（リアルタイム駆動）' },
+    {
+      label: '目標方位（操舵）',
+      value: `${commandHeadingDeg > 0 ? '+' : ''}${commandHeadingDeg}°`,
+    },
+    { label: '指令方向 前進', value: `${fwd.toFixed(1)} cm` },
+  ];
+}
+
+/** 選択コース×汎用方策でライブ駆動を開始（重みを純JSフォワードへロードし env を用意）。 */
+async function startLive(): Promise<void> {
+  const entry = generalPolicyEntry();
+  if (!entry) {
+    motionMode = 'scripted';
+    updateModeAvailability();
+    await run();
+    return;
+  }
+  const seq = ++loadSeq;
+  renderStats([{ label: '状態', value: 'ライブ方策を初期化中…' }]);
+  torqueCapNm = getServo(motorId).stallNm;
+  syncTorqueUI();
+  const stem = `snake3d-general-${motorId}`;
+  let weights: PolicyWeightsFile;
+  try {
+    weights = await loadPolicyWeights(stem);
+  } catch (err) {
+    if (seq !== loadSeq) return;
+    motionMode = 'scripted';
+    updateModeAvailability();
+    tunedInfo.textContent = 'ライブ用の重みが見つからないため基盤歩容に戻しました';
+    console.error(err);
+    await run();
+    return;
+  }
+  if (seq !== loadSeq) return;
+
+  // 学習時と同じモーター設定（stiffness/damping は固定、cap はサーボの stall）で env を作る。
+  const servo = getServo(motorId);
+  const terrain = COURSES[effectiveCourse() as CourseId]();
+  const cfg = defaultSnakeEnvConfig({
+    terrain,
+    motor: { stiffness: 3, damping: 0.15, maxTorqueNm: servo.stallNm },
+  });
+  cfg.episodeSteps = 1800; // 終端まで走り、到達したら自動 reset でループ
+  const env = await SnakeEnv.create(cfg);
+  if (seq !== loadSeq) {
+    env.dispose();
+    return;
+  }
+
+  stopLive(); // 直前のライブ env があれば破棄してから差し替え
+  liveEnv = env;
+  liveForward = makePolicyForward(weights.weights, weights.obsDim, weights.actDim);
+  resetLiveEpisode();
+
+  // ビューを組む（再生 replay は使わないので null 化）。グリッドは進行範囲を広めに固定で張る。
+  replay = null;
+  view.showSnake3D();
+  view.buildSnake3D(env.getLayout());
+  view.setSnake3DTerrain(terrain);
+  view.setSnake3DLiveGrid([-1, 13], [-2, 2]);
+  setPlaying(true);
+  tunedInfo.textContent = 'ライブ: 汎用方策をブラウザ内でリアルタイム駆動。スライダーで即操舵。';
+  buildParamSliders();
+  renderStats(liveStatsRows());
+}
+
+/** ライブの制御を1ステップ進める（目標方位を反映→方策の平均行動→env.step、終端で自動 reset）。 */
+function liveStepOnce(): void {
+  if (!liveEnv || !liveForward) return;
+  // スライダーは目標方位だけを与える。曲がる動き（yaw 曲率）は方策が操舵行動として出力する＝RL が獲得した操舵。
+  liveEnv.setCommandHeading(commandHeadingDeg * DEG);
+  const action = liveForward(liveObs);
+  const r = liveEnv.step(action);
+  liveObs = r.obs;
+  if (r.done) resetLiveEpisode();
+}
+
+/** 実時間 dt ぶんだけライブ env を制御周期単位で進め、現在姿勢をビューへ適用する。 */
+function stepLive(dt: number): void {
+  if (!liveEnv || !liveForward) return;
+  liveAccum += dt * speed;
+  const period = liveEnv.controlPeriod;
+  let n = 0;
+  while (liveAccum >= period && n < MAX_LIVE_STEPS_PER_FRAME) {
+    liveStepOnce();
+    liveAccum -= period;
+    n++;
+  }
+  if (liveAccum > period) liveAccum = period; // バックログを溜め込まない（重い時も実時間付近を保つ）
+  view.applySnake3DFrame({ bodies: liveEnv.currentBodies() });
+  if (++liveStatsThrottle >= 12) {
+    liveStatsThrottle = 0;
+    renderStats(liveStatsRows());
+  }
+}
+
+// ---- 選択変更の共通経路: モード可否を更新し、scripted / RL / ライブ に応じて再構成 ----
 async function reload(): Promise<void> {
   updateModeAvailability();
+  stopLive(); // ライブ env は毎回作り直す（コース/モーター変更を反映）。live なら startLive が再生成する
   if (motionMode === 'rl') {
     await runRL();
+    return;
+  }
+  if (motionMode === 'live') {
+    await startLive();
     return;
   }
   // scripted: 基盤登坂歩容を選択コースでライブ実行。
@@ -443,10 +639,16 @@ btnRL.addEventListener('click', () => {
   motionMode = 'rl';
   void reload();
 });
+btnLive.addEventListener('click', () => {
+  if (motionMode === 'live' || btnLive.disabled) return;
+  motionMode = 'live';
+  void reload();
+});
 headingInput.addEventListener('input', () => {
   commandHeadingDeg = Number(headingInput.value);
   headingValue.textContent = `${commandHeadingDeg > 0 ? '+' : ''}${commandHeadingDeg}°`;
-  if (motionMode === 'rl') void runRL(); // 最近傍の録画方位を再生（fetch はキャッシュ）
+  // ライブは次ステップで env.setCommandHeading が読むので即操舵（再構成不要）。
+  if (motionMode === 'rl') void runRL(); // RL は最近傍の録画方位を再生（fetch はキャッシュ）
 });
 torqueCapInput.addEventListener('input', () => {
   torqueCapNm = Number(torqueCapInput.value);
@@ -455,6 +657,12 @@ torqueCapInput.addEventListener('input', () => {
 });
 btnPlay.addEventListener('click', () => setPlaying(!playing));
 btnReset.addEventListener('click', () => {
+  if (motionMode === 'live') {
+    resetLiveEpisode();
+    setPlaying(true);
+    renderStats(liveStatsRows());
+    return;
+  }
   playbackTime = 0;
   setPlaying(true);
   if (replay) replay.applyTime(view, playbackTime);
@@ -477,7 +685,9 @@ function loop(timestamp: number): void {
   const dt = Math.min((timestamp - lastTimestamp) / 1000, 0.25);
   lastTimestamp = timestamp;
 
-  if (replay && replay.duration > 0 && playing) {
+  if (motionMode === 'live' && liveEnv && liveForward) {
+    if (playing) stepLive(dt);
+  } else if (replay && replay.duration > 0 && playing) {
     playbackTime = (playbackTime + dt * speed) % replay.duration;
     replay.applyTime(view, playbackTime);
     updateControls();

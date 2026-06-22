@@ -181,16 +181,23 @@
       <!-- sliders injected from mechanism.params in dashboard.ts -->
       <div id="param-sliders"></div>
       <div id="learned-gait">
-        <div class="section-title">歩容: 基盤(scripted) vs 学習方策(RL)</div>
+        <div class="section-title">歩容: 基盤(scripted) / RL録画 / ライブ操舵</div>
         <div class="row">
           <button id="btn-scripted" class="active" title="開ループの基盤登坂歩容（残差0）">
             基盤歩容
           </button>
           <button id="btn-rl" disabled title="この コース×モーター の RL 方策はありません">
-            RL方策
+            RL録画
+          </button>
+          <button
+            id="btn-live"
+            disabled
+            title="汎用方策をブラウザ内でリアルタイム駆動（スライダーで即操舵）"
+          >
+            ライブ
           </button>
         </div>
-        <!-- 操舵: RL 方策に与える目標方位（相対方位）。最近傍の録画方位を再生。scripted では非表示。 -->
+        <!-- 操舵: 方策に与える目標方位（相対方位）。RL=最近傍の録画方位を再生 / ライブ=連続で即操舵。scripted では非表示。 -->
         <div id="heading-ctl" style="display: none">
           <label>目標方位（操舵） <span id="v-heading">0°</span></label>
           <input id="s-heading" type="range" min="-25" max="25" step="5" value="0" />

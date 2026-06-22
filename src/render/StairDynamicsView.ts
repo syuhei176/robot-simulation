@@ -203,6 +203,52 @@ export class StairDynamicsView {
     this.snake3dHeadDot = dot;
   }
 
+  /**
+   * ライブ駆動用の静的な距離グリッド（0.25m 毎）＋開始マーカー＋頭ドットを decor に置く。
+   * 録画再生の setSnake3DTrail と違い、ライブは経路を先に持たない（毎ステップ進む）ので、進行範囲を
+   * 覆う固定グリッドを張る。カメラが蛇を追うと、グリッド上を蛇が進む様子で移動・操舵が一目で読める。
+   * buildSnake3D が decor を作り直すので、それより後に呼ぶこと。
+   */
+  setSnake3DLiveGrid(xRange: [number, number], yRange: [number, number]): void {
+    this.snake3dDecor.clear();
+    this.snake3dHeadDot = null;
+    const tickMat = new THREE.LineBasicMaterial({
+      color: 0x4c5560,
+      transparent: true,
+      opacity: 0.6,
+    });
+    const G = 0.25;
+    const [x0, x1] = xRange;
+    const [y0, y1] = yRange;
+    const addLine = (a: THREE.Vector3, b: THREE.Vector3): void => {
+      this.snake3dDecor.add(
+        new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), tickMat),
+      );
+    };
+    for (let x = Math.floor(x0 / G) * G; x <= x1 + 1e-9; x += G) {
+      addLine(new THREE.Vector3(x, y0, 0.001), new THREE.Vector3(x, y1, 0.001));
+    }
+    for (let y = Math.floor(y0 / G) * G; y <= y1 + 1e-9; y += G) {
+      addLine(new THREE.Vector3(x0, y, 0.001), new THREE.Vector3(x1, y, 0.001));
+    }
+
+    // 開始マーカー（リング）。
+    const start = new THREE.Mesh(
+      new THREE.RingGeometry(0.012, 0.022, 20),
+      new THREE.MeshBasicMaterial({ color: 0xf2a33a, side: THREE.DoubleSide }),
+    );
+    start.position.set(0, 0, 0.003);
+    this.snake3dDecor.add(start);
+
+    // 頭の現在位置ドット（applySnake3DFrame で毎フレーム更新）。
+    const dot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.012, 12, 10),
+      new THREE.MeshBasicMaterial({ color: 0x35c8ff }),
+    );
+    this.snake3dDecor.add(dot);
+    this.snake3dHeadDot = dot;
+  }
+
   /** 3D 蛇の1フレーム（各リンクのシム座標 p,q）を適用し、頭を上空から追従する（移動が見えるよう少し引く）。 */
   applySnake3DFrame(frame: {
     bodies: Array<{ p: [number, number, number]; q: [number, number, number, number] }>;

@@ -3,8 +3,10 @@ dist
 .DS_Store
 *.local
 
-# RL 学習の出力。重み JSON（大きく再生成可能）は追跡せず、ダッシュボード再生用の
+# RL 学習の出力。重み JSON（大きく再生成可能）は基本追跡せず、ダッシュボード再生用の
 # .replay.json（フレーム記録・軽量）と manifest.json はコミットする。
+# 例外: コース汎用の単一重み（ライブ操舵モードがブラウザ内フォワードで使う）は追跡する。
 public/policies/*.json
 !public/policies/*.replay.json
 !public/policies/manifest.json
+!public/policies/snake3d-general-mg996r.json

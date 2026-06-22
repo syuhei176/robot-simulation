@@ -9,10 +9,10 @@
     "mass": 0.6,
     "base": "climb-gait",
     "policy": "general",
-    "forwardM": 8.4592,
+    "forwardM": 8.7918,
     "baseForwardM": 5.5541,
-    "achievedDeg": -10.3812,
-    "crossM": 1.5497,
+    "achievedDeg": 15.4769,
+    "crossM": 2.4344,
     "fell": false
   },
   {
@@ -25,10 +25,10 @@
     "mass": 0.6,
     "base": "climb-gait",
     "policy": "general",
-    "forwardM": 8.4524,
+    "forwardM": 8.2145,
     "baseForwardM": 6.9233,
-    "achievedDeg": -15.7202,
-    "crossM": 1.3811,
+    "achievedDeg": -2.1919,
+    "crossM": 3.4544,
     "fell": false
   },
   {
@@ -41,10 +41,10 @@
     "mass": 0.6,
     "base": "climb-gait",
     "policy": "general",
-    "forwardM": 7.0112,
+    "forwardM": 8.8188,
     "baseForwardM": 3.1441,
-    "achievedDeg": -9.8504,
-    "crossM": 4.8821,
+    "achievedDeg": 22.5405,
+    "crossM": 0.3788,
     "fell": false
   },
   {
@@ -57,10 +57,10 @@
     "mass": 0.6,
     "base": "climb-gait",
     "policy": "general",
-    "forwardM": 9.3935,
+    "forwardM": 8.976,
     "baseForwardM": 9.4272,
-    "achievedDeg": -3.0396,
-    "crossM": 0.4988,
+    "achievedDeg": 20.6665,
+    "crossM": 3.3857,
     "fell": false
   },
   {
@@ -73,10 +73,10 @@
     "mass": 0.6,
     "base": "climb-gait",
     "policy": "general",
-    "forwardM": 9.09,
+    "forwardM": 8.0162,
     "baseForwardM": 8.6312,
-    "achievedDeg": -12.3659,
-    "crossM": 2.0375,
+    "achievedDeg": 9.4868,
+    "crossM": 5.5066,
     "fell": false
   },
   {
@@ -89,10 +89,10 @@
     "mass": 0.6,
     "base": "climb-gait",
     "policy": "general",
-    "forwardM": 8.7682,
+    "forwardM": 9.3765,
     "baseForwardM": 8.4567,
-    "achievedDeg": 4.112,
-    "crossM": 3.3461,
+    "achievedDeg": 27.332,
+    "crossM": 0.3819,
     "fell": false
   },
   {
@@ -105,10 +105,10 @@
     "mass": 0.6,
     "base": "climb-gait",
     "policy": "general",
-    "forwardM": 3.8303,
+    "forwardM": 4.4016,
     "baseForwardM": 3.4773,
-    "achievedDeg": -53.5331,
-    "crossM": 5.1826,
+    "achievedDeg": 47.5081,
+    "crossM": 4.8048,
     "fell": false
   },
   {
@@ -121,10 +121,10 @@
     "mass": 0.6,
     "base": "climb-gait",
     "policy": "general",
-    "forwardM": 5.6032,
+    "forwardM": 6.4567,
     "baseForwardM": 5.2725,
-    "achievedDeg": -54.4545,
-    "crossM": 3.1642,
+    "achievedDeg": -43.9549,
+    "crossM": 2.2175,
     "fell": false
   },
   {
@@ -137,10 +137,10 @@
     "mass": 0.6,
     "base": "climb-gait",
     "policy": "general",
-    "forwardM": 1.2803,
+    "forwardM": 6.2363,
     "baseForwardM": 1.0304,
-    "achievedDeg": -53.5559,
-    "crossM": 6.3242,
+    "achievedDeg": 49.2281,
+    "crossM": 2.8064,
     "fell": false
   }
 ]
