@@ -154,7 +154,11 @@ export function makeRandomCourse(rng: () => number = Math.random): SnakeTerrainB
  */
 export function makeCourseBank(nRandom = 9, rng: () => number = Math.random): SnakeTerrainBox[][] {
   const bank: SnakeTerrainBox[][] = [
-    [], // 平地
+    // 平地 ×3。地形なしでの操舵は接触の助けが無く難しいので練習量を増やす（地形依存の veer バイアスに
+    // 引っ張られず、平地でも目標方位へ操舵できるようにする）。残りはランダムで終端壁つきも混ざる。
+    [],
+    [],
+    [],
     makeProgressionTerrain(),
     makeStraightChallengeTerrain(),
   ];

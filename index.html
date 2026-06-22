@@ -190,6 +190,11 @@
             RL方策
           </button>
         </div>
+        <!-- 操舵: RL 方策に与える目標方位（相対方位）。最近傍の録画方位を再生。scripted では非表示。 -->
+        <div id="heading-ctl" style="display: none">
+          <label>目標方位（操舵） <span id="v-heading">0°</span></label>
+          <input id="s-heading" type="range" min="-25" max="25" step="5" value="0" />
+        </div>
         <div class="tuned-info" id="tuned-info"></div>
       </div>
       <!-- rows injected from liveStats()/resultStats() in dashboard.ts -->

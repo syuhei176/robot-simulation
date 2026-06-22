@@ -1,14 +1,18 @@
 /**
- * 3D 蛇（MuJoCo）の強化学習環境 — 進行性地形（小障害物 → 階段 → テーブル）の走破。
+ * 3D 蛇（MuJoCo）の強化学習環境 — 実機センサー相当の観測で「任意方位へ操舵しながら地形を走る」汎用方策を学ぶ。
  *
  * `runSnake3D` の制御（パラメタ化セルペノイド波 PD ＋ 車輪相当の異方力場 ＋ 実接触）を「1 制御ステップずつ
  * 進められる」形にほどき、**残差RL**で駆動する: 各関節の目標角 = 前進登坂歩容のターゲット(時間依存) + 方策の残差
  * (±maxJointDelta·tanh(action))。土台の歩容（alt-yaw-pitch・yaw前進＋pitch持ち上げ）は action=0 でも障害物＋
- * 階段を越えるので（Stage1 で検証済み）、方策は「いつ・どの関節を余分に持ち上げ/曲げて段を越えるか」を、
- * 前方地形プレビュー観測を手がかりに学べばよい。決定論方策も最初から前進する＝end-to-end の縮退を回避。
+ * 階段を越えるので、方策は「いつ・どの関節を余分に動かして段を越え、目標方位へ操舵し直すか」を学べばよい。
  *
- * 物理は `runSnake3D` と同じ z-up・MuJoCo。観測=位相クロック＋COM速度＋頭クリアランス＋頭ピッチ＋前方地形
- * プレビュー＋関節角。報酬=前進(+x) − 横ドリフト − 行動エネルギー − トルク飽和 ＋ 生存。数値破綻で終了。
+ * **観測は実機（サーボ＋頭IMU）で取れる信号だけ**にしてある（sim-to-real）: 関節角/速度/負荷（present
+ * position/velocity/load）＋頭IMU（姿勢・ジャイロ）＋位相クロック＋目標ヘディング誤差。シミュ特権情報
+ * （前方地形プレビュー・絶対COM位置・頭尾から計算する厳密ヘディング）は使わない。
+ *
+ * 「目的地」は絶対(x,y)ではなく**目標ヘディング指令（相対方位）**で与える（localization 不要＝実機で成立）。
+ * 報酬は「指令方向への前進 − 指令光線からの横ずれ − エネルギー/トルク飽和 ＋ 生存」。目標方位=0 が直進に一致。
+ * エピソード毎に目標方位をランダム化して操舵を学ぶ。物理は `runSnake3D` と同じ z-up・MuJoCo。
  */
 import { getMujoco, type MujocoModule } from '../sim3d/mujoco-engine.ts';
 import {
@@ -35,17 +39,18 @@ export interface SnakeEnvConfig {
   episodeSteps: number; // 1 エピソードの制御ステップ数
   controlFrames: number; // 1 制御ステップが含む sim.dt フレーム数（制御周期 = controlFrames·dt）
   maxJointDelta: number; // 関節残差の可動幅 [rad]（土台ターゲット中心の ±）
-  previewOffsets: number[]; // 前方地形プレビューの COM 前方オフセット [m]
-  forwardReward: number; // 前進(+x)量への係数
-  lateralPenalty: number; // 横ドリフト速度 |Δy| への係数（うねりの横揺れを軽く抑える）
-  centerlinePenalty: number; // センターライン（開始 y）からの絶対オフセット |y−y0| への係数（直進補正）
-  centerlineCap: number; // センターライン罰を頭打ちにする距離 [m]（学習初期の暴走防止）
+  headingMaxRad: number; // 目標ヘディングのランダム化範囲 ±[rad]（操舵の学習。0 なら常に直進=+x）
+  headYawEmaTau: number; // 頭IMU yaw の EMA フィルタ時定数 [s]（うねりの振動を均して走行方位を推定）
+  forwardReward: number; // 指令方向への前進量への係数
+  lateralPenalty: number; // 指令方向に対する横速度 |⊥Δ| への係数（大 veer の矯正）
+  centerlinePenalty: number; // 指令光線（開始点を通る方位線）からの横ずれ |⊥offset| への係数（操舵の追従）
+  centerlineCap: number; // 横ずれ罰を頭打ちにする距離 [m]（学習初期の暴走防止）
   energyPenalty: number; // 行動エネルギー（残差二乗平均）への係数
   satPenalty: number; // トルク飽和率への係数
   aliveBonus: number; // 生存ボーナス
 }
 
-/** 既定: 進行性地形＋前進登坂歩容（Stage1 で障害物＋階段を越えると確認した土台）。 */
+/** 既定: 進行性地形＋前進登坂歩容（障害物＋階段を越える土台）＋ ±30° の操舵ランダム化。 */
 export function defaultSnakeEnvConfig(overrides: Partial<Snake3DConfig> = {}): SnakeEnvConfig {
   const sim: Snake3DConfig = {
     ...DEFAULT_SNAKE3D_CONFIG,
@@ -64,16 +69,20 @@ export function defaultSnakeEnvConfig(overrides: Partial<Snake3DConfig> = {}): S
     sim,
     episodeSteps: 500,
     controlFrames: 5, // 制御周期 = 5/240 ≈ 48 Hz
-    // 残差幅。残差RLは action=0 で良い基盤（直進チャレンジで前進 555cm）なので、必要なのは小さな操舵補正だけ。
+    // 残差幅。残差RLは action=0 で良い基盤（前進）なので、必要なのは段越えの追加動作と操舵補正だけ。
     // 幅を絞ると方策が基盤から大きく逸脱できず、学習の「床」が基盤付近に保たれて崩壊（後退）しにくい。
     maxJointDelta: 0.2,
-    previewOffsets: [0.2, 0.4, 0.7, 1.0],
+    headingMaxRad: 0.5236, // ±30°。エピソード毎に目標方位を一様サンプル（θ≈0 も含み「直進時は操舵しない」を学ぶ）
+    headYawEmaTau: 0.6, // ≈半歩容周期。頭yawはうねりで±30°超振れるので均して平均方位を取り出す
     forwardReward: 20,
-    lateralPenalty: 1.0, // per-step 横速度の軽い減衰（うねり自体は許す）。直進補正は centerlinePenalty が担う
-    // |y−y0| を罰して斜行を中心へ戻させる。ただし上限付き（centerlineCap で飽和）＝学習初期に大ドリフトしても
-    // 罰が暴走せず（無制限だと基盤の -4.5m で penalty が前進報酬を桁違いに上回り PPO が崩壊する）、前進報酬が支配を保つ。
-    centerlinePenalty: 0.1,
-    centerlineCap: 0.6, // この距離[m]で罰を頭打ちに（最大 centerlinePenalty·centerlineCap ≈ 前進報酬と同程度）
+    // **大veer の矯正**: per-step の指令直交速度 |⊥Δ| への強い罰。ドリフト「率」を罰するので大きく逸れた時の
+    // 矯正圧が強い（challenge の大 veer をここで綺麗に直す）。速度比例＝有界で PPO 安定。
+    lateralPenalty: 8.0,
+    // **定常ドリフトの矯正**: 指令光線からの横ずれ（積分距離）を罰す。**cap を広く**取り（3.0m）「ずれるほど悪い」
+    // 勾配をエピソード全域で効かせる＝平地の小さな定常ドリフト(±13°)も直させる（cap 0.8 では即飽和し勾配が消えて
+    // いた）。飽和値 centerlinePenalty·cap ≈ 前進報酬1step分に収め、無制限罰の崩壊(S14)も避ける（有界で安定）。
+    centerlinePenalty: 0.03,
+    centerlineCap: 3.0,
     energyPenalty: 0.002,
     satPenalty: 0.05,
     aliveBonus: 0.01,
@@ -83,6 +92,25 @@ export function defaultSnakeEnvConfig(overrides: Partial<Snake3DConfig> = {}): S
 const tanh = Math.tanh;
 function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
+}
+
+type Quat = [number, number, number, number]; // x,y,z,w
+
+/** クォータニオン共役（[x,y,z,w]）。 */
+function quatConj(q: Quat): Quat {
+  return [-q[0], -q[1], -q[2], q[3]];
+}
+
+/** クォータニオン積 a⊗b（[x,y,z,w]）。 */
+function quatMul(a: Quat, b: Quat): Quat {
+  const [ax, ay, az, aw] = a;
+  const [bx, by, bz, bw] = b;
+  return [
+    aw * bx + ax * bw + ay * bz - az * by,
+    aw * by - ax * bz + ay * bw + az * bx,
+    aw * bz + ax * by - ay * bx + az * bw,
+    aw * bw - ax * bx - ay * by - az * bz,
+  ];
 }
 
 export class SnakeEnv implements RLEnv {
@@ -101,6 +129,7 @@ export class SnakeEnv implements RLEnv {
   private readonly spatialPhase: number;
   private readonly groundGate: number;
   private readonly layout: SnakeBodyLayout[];
+  private readonly emaAlpha: number; // 頭yaw EMA の係数（controlPeriod / (tau+controlPeriod)）
 
   // MuJoCo モデルは地形バンクの各地形ごとに1回だけコンパイルして保持、data はエピソード毎に作り直す。
   // ドメインランダム化では reset 毎に地形（=モデル）をランダムに切り替える。バンク未指定なら要素1個。
@@ -111,6 +140,7 @@ export class SnakeEnv implements RLEnv {
   private data: InstanceType<MujocoModule['MjData']>;
 
   private readonly residual: Float64Array;
+  private readonly jointTau: Float64Array; // 直近に印加した関節トルク（present load 観測用）
   private readonly prevPos: Array<[number, number, number]>;
   private readonly obs: Float32Array;
   private simSubstep = 0;
@@ -119,6 +149,14 @@ export class SnakeEnv implements RLEnv {
   private startComY = 0;
   private prevComX = 0;
   private prevComY = 0;
+
+  // 操舵指令（相対方位）と、頭IMU の派生状態。
+  private cmdHeadingRad = 0;
+  private cmdDirX = 1;
+  private cmdDirY = 0;
+  private yawEmaCos = 1; // 頭yaw を単位ベクトルで EMA（角度のラップ回避）
+  private yawEmaSin = 0;
+  private prevHeadQuat: Quat = [0, 0, 0, 1]; // ジャイロ（角速度）算出用の前ステップ頭姿勢
 
   // 記録（決定論ロールアウト → ダッシュボード再生用）。
   private recording = false;
@@ -143,6 +181,8 @@ export class SnakeEnv implements RLEnv {
     this.layout = Array.from({ length: this.n }, () => ({
       half: [this.sim.segLen / 2, this.halfW, this.halfW] as [number, number, number],
     }));
+    const controlPeriod = cfg.controlFrames * this.sim.dt;
+    this.emaAlpha = controlPeriod / (cfg.headYawEmaTau + controlPeriod);
 
     // 地形バンク（未指定なら sim.terrain 単体）。各地形のモデルを事前コンパイル。
     this.terrains =
@@ -155,11 +195,12 @@ export class SnakeEnv implements RLEnv {
     this.data = new mj.MjData(this.model);
 
     this.actDim = this.nJoints; // 各関節の歩容残差
-    // 観測: 位相(2)+COM速度(2)+頭クリアランス(1)+頭ピッチ(1)+横オフセット(1)+体軸ヘディング(2)
-    //       +前方地形プレビュー(K)+関節角(nJoints)。横オフセット＋ヘディングが直進補正の閉ループ信号。
-    this.obsDim = 9 + cfg.previewOffsets.length + this.nJoints;
+    // 観測（実機相当）: 関節角(nJoints)+関節速度(nJoints)+関節負荷(nJoints)
+    //   +頭IMU姿勢[fwd xy, pitch, roll](4)+頭IMUジャイロ(3)+位相(2)+目標ヘディング誤差 sin/cos(2)。
+    this.obsDim = 3 * this.nJoints + 11;
     this.obs = new Float32Array(this.obsDim);
     this.residual = new Float64Array(this.actDim);
+    this.jointTau = new Float64Array(this.nJoints);
     this.prevPos = Array.from({ length: this.n }, () => [0, 0, 0] as [number, number, number]);
   }
 
@@ -193,27 +234,25 @@ export class SnakeEnv implements RLEnv {
     return [x / this.n, y / this.n];
   }
 
-  /** 歩行面（足場/壁）の地形上面 [m]。天板など頭上の張り出し（底面が高い箱）は除外する。 */
-  private groundTopAt(x: number, y: number): number {
-    let top = 0;
-    for (const b of this.activeTerrain) {
-      if (b.cz - b.halfZ > 0.12) continue; // 頭上の張り出し（テーブル天板）は歩行面でない
-      if (Math.abs(x - b.cx) <= b.halfX && Math.abs(y - b.cy) <= b.halfY) {
-        top = Math.max(top, b.cz + b.halfZ);
-      }
-    }
-    return top;
+  /** 頭リンク（先頭リンク n-1）の姿勢クォータニオン [x,y,z,w]（頭IMU 相当）。 */
+  private headQuat(): Quat {
+    const xquat = this.data.xquat;
+    const bid = this.bodyId(this.n - 1);
+    return [xquat[bid * 4 + 1], xquat[bid * 4 + 2], xquat[bid * 4 + 3], xquat[bid * 4]];
   }
 
+  /** 指令方向への前進量（射影）。`progressMetric()-開始値` がコマンド方向の前進になる。 */
   progressMetric(): number {
-    return this.com()[0];
+    const [cx, cy] = this.com();
+    return cx * this.cmdDirX + cy * this.cmdDirY;
   }
 
   /**
-   * エピソードを初期化。地形バンクが複数なら毎回ランダムに地形（=事前コンパイル済みモデル）を選ぶ
-   *（ドメインランダム化）。`forceTerrainIdx` を渡せば特定地形に固定（決定論評価・録画用）。
+   * エピソードを初期化。地形バンクが複数なら毎回ランダムに地形（=事前コンパイル済みモデル）を選ぶ。
+   * 目標ヘディングも毎回 ±headingMaxRad で一様ランダム化（操舵の学習）。`forceTerrainIdx`/`forceHeadingRad`
+   * を渡せば固定（決定論評価・録画用）。
    */
-  reset(forceTerrainIdx?: number): Float32Array {
+  reset(forceTerrainIdx?: number, forceHeadingRad?: number): Float32Array {
     const idx =
       forceTerrainIdx !== undefined
         ? forceTerrainIdx
@@ -225,6 +264,14 @@ export class SnakeEnv implements RLEnv {
     this.data.delete();
     this.data = new this.mj.MjData(this.model);
     this.mj.mj_forward(this.model, this.data);
+
+    // 目標ヘディング指令（相対方位）。0=+x。±headingMaxRad の一様サンプル（forceHeadingRad で固定）。
+    this.cmdHeadingRad =
+      forceHeadingRad !== undefined
+        ? forceHeadingRad
+        : (Math.random() * 2 - 1) * this.cfg.headingMaxRad;
+    this.cmdDirX = Math.cos(this.cmdHeadingRad);
+    this.cmdDirY = Math.sin(this.cmdHeadingRad);
 
     const xpos = this.data.xpos;
     for (let i = 0; i < this.n; i++) {
@@ -241,6 +288,16 @@ export class SnakeEnv implements RLEnv {
     this.simSubstep = 0;
     this.stepCount = 0;
     this.residual.fill(0);
+    this.jointTau.fill(0);
+
+    // 頭IMU 派生状態の初期化: yaw EMA を初期 yaw に、ジャイロ用の前姿勢を現姿勢に。
+    const hq = this.headQuat();
+    const fwd0 = qRotate(hq, [1, 0, 0]);
+    const yaw0 = Math.atan2(fwd0[1], fwd0[0]);
+    this.yawEmaCos = Math.cos(yaw0);
+    this.yawEmaSin = Math.sin(yaw0);
+    this.prevHeadQuat = hq;
+
     this.frames = [];
     this.epMaxDemand = 0;
     this.epMaxApplied = 0;
@@ -257,8 +314,9 @@ export class SnakeEnv implements RLEnv {
   getReplay(): Snake3DReplay {
     const [cx, cy] = this.com();
     const dx = cx - this.startComX;
-    const dy = cy - this.startComY; // 開始からの正味横ドリフト
+    const dy = cy - this.startComY; // 開始からの正味変位
     const travelM = Math.hypot(dx, dy);
+    const forwardProj = dx * this.cmdDirX + dy * this.cmdDirY; // 指令方向への正味前進
     return {
       layout: this.layout,
       frames: this.frames,
@@ -271,11 +329,11 @@ export class SnakeEnv implements RLEnv {
         },
         travelM,
         netDispM: [dx, dy],
-        headingDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
+        headingDeg: (Math.atan2(dy, dx) * 180) / Math.PI, // 達成方位（実測）
         maxDemandNm: this.epMaxDemand,
         maxAppliedNm: this.epMaxApplied,
         saturatedSteps: this.epSatSteps,
-        success: dx > this.sim.segLen * this.n * 0.5,
+        success: forwardProj > this.sim.segLen * this.n * 0.5,
       },
     };
   }
@@ -325,7 +383,7 @@ export class SnakeEnv implements RLEnv {
             drive.push([0, 0]);
             continue;
           }
-          const q: [number, number, number, number] = [
+          const q: Quat = [
             xquat[bid * 4 + 1],
             xquat[bid * 4 + 2],
             xquat[bid * 4 + 3],
@@ -354,6 +412,7 @@ export class SnakeEnv implements RLEnv {
           const raw = this.sim.motor.stiffness * (target - angle) - this.sim.motor.damping * vel;
           const tau = clamp(raw, -this.sim.motor.maxTorqueNm, this.sim.motor.maxTorqueNm);
           qfrc[6 + j] = tau;
+          this.jointTau[j] = tau; // present load（最後のサブステップの印加トルク）を観測へ
           stepDemand = Math.max(stepDemand, Math.abs(raw));
           stepApplied = Math.max(stepApplied, Math.abs(tau));
           satSamples++;
@@ -370,12 +429,14 @@ export class SnakeEnv implements RLEnv {
       }
     }
 
-    // --- 報酬 ---
+    // --- 報酬（指令方向 cmdDir の座標系で評価） ---
     const [cx, cy] = this.com();
     const dx = cx - this.prevComX;
     const dy = cy - this.prevComY;
     this.prevComX = cx;
     this.prevComY = cy;
+    const forwardProj = dx * this.cmdDirX + dy * this.cmdDirY; // 指令方向への前進
+    const lateralProj = -dx * this.cmdDirY + dy * this.cmdDirX; // 指令直交（横ずれ速度）
 
     let energy = 0;
     for (let j = 0; j < this.actDim; j++) {
@@ -385,12 +446,15 @@ export class SnakeEnv implements RLEnv {
     energy /= this.actDim;
     const satFrac = satSamples > 0 ? satCount / satSamples : 0;
 
-    const offset = cy - this.startComY; // センターライン（開始 y）からの横ずれ
-    const offMag = Math.min(Math.abs(offset), this.cfg.centerlineCap); // 上限付き（暴走防止）
+    // 指令光線（開始点を通る方位線）からの横ずれ＝追従誤差の積分。上限付き（暴走防止）。
+    const ox = cx - this.startComX;
+    const oy = cy - this.startComY;
+    const crossOffset = -ox * this.cmdDirY + oy * this.cmdDirX;
+    const offMag = Math.min(Math.abs(crossOffset), this.cfg.centerlineCap);
     const blewUp = !Number.isFinite(cx) || !Number.isFinite(cy) || Math.abs(cx) > 50;
     let reward =
-      this.cfg.forwardReward * dx -
-      this.cfg.lateralPenalty * Math.abs(dy) -
+      this.cfg.forwardReward * forwardProj -
+      this.cfg.lateralPenalty * Math.abs(lateralProj) -
       this.cfg.centerlinePenalty * offMag -
       this.cfg.energyPenalty * energy -
       this.cfg.satPenalty * satFrac +
@@ -420,7 +484,7 @@ export class SnakeEnv implements RLEnv {
           t: this.simSubstep * this.physicsDt,
           bodies,
           diag: {
-            travelM: cx - this.startComX,
+            travelM: Math.hypot(ox, oy), // 開始からの総移動距離（向きに依らない）
             demandNm: stepDemand,
             appliedNm: stepApplied,
             saturated,
@@ -434,48 +498,47 @@ export class SnakeEnv implements RLEnv {
 
   private writeObs(): Float32Array {
     const o = this.obs;
-    const [cx, cy] = this.com();
-    const xpos = this.data.xpos;
-    const xquat = this.data.xquat;
-    const headBid = this.bodyId(this.n - 1);
-    const headX = xpos[headBid * 3];
-    const headY = xpos[headBid * 3 + 1];
-    const headZ = xpos[headBid * 3 + 2];
-    const hq: [number, number, number, number] = [
-      xquat[headBid * 4 + 1],
-      xquat[headBid * 4 + 2],
-      xquat[headBid * 4 + 3],
-      xquat[headBid * 4],
-    ];
-    const headFwd = qRotate(hq, [1, 0, 0]);
-
-    const ts = this.simSubstep * this.physicsDt;
-    o[0] = Math.sin((2 * Math.PI * ts) / this.sim.period);
-    o[1] = Math.cos((2 * Math.PI * ts) / this.sim.period);
-    o[2] = (cx - this.prevComX) / 0.02; // 1 制御ステップの前進量を粗く正規化
-    o[3] = (cy - this.prevComY) / 0.02;
-    o[4] = (headZ - this.groundTopAt(headX, headY)) / 0.05; // 頭クリアランス
-    o[5] = headFwd[2]; // 頭ピッチ（+1=真上, -1=真下）
-    // 直進補正の閉ループ信号: センターライン（開始 y）からの横オフセットと、体軸ヘディング。
-    o[6] = clamp((cy - this.startComY) / 0.5, -3, 3); // 横オフセット（どれだけ斜行したか）
-    const tailBid = this.bodyId(0);
-    let axX = headX - xpos[tailBid * 3];
-    let axY = headY - xpos[tailBid * 3 + 1];
-    const axLen = Math.hypot(axX, axY) || 1;
-    axX /= axLen;
-    axY /= axLen;
-    o[7] = axX; // 体軸ヘディング x（真っ直ぐ +x なら ≈±1）
-    o[8] = axY; // 体軸ヘディング y（veer 量＝符号付きで操舵方向が分かる）
-    // 前方地形プレビュー: COM 前方各オフセットの歩行面高さ − COM 直下の歩行面高さ。
-    const baseTop = this.groundTopAt(cx, cy);
-    const pBase = 9;
-    for (let i = 0; i < this.cfg.previewOffsets.length; i++) {
-      o[pBase + i] = (this.groundTopAt(cx + this.cfg.previewOffsets[i], cy) - baseTop) / 0.06;
-    }
-    // 関節角。
     const qpos = this.data.qpos;
-    const jBase = pBase + this.cfg.previewOffsets.length;
-    for (let j = 0; j < this.nJoints; j++) o[jBase + j] = qpos[7 + j];
+    const qvel = this.data.qvel;
+
+    // 関節角・関節速度・関節負荷（実機サーボの present position / velocity / load）。
+    let k = 0;
+    for (let j = 0; j < this.nJoints; j++) o[k++] = qpos[7 + j]; // 角 [rad]
+    for (let j = 0; j < this.nJoints; j++) o[k++] = qvel[6 + j] / 10; // 速度（粗く正規化）
+    for (let j = 0; j < this.nJoints; j++) o[k++] = this.jointTau[j] / this.sim.motor.maxTorqueNm; // 負荷 τ/cap（符号付き [-1,1]）
+
+    // 頭IMU: 姿勢（先頭リンクのワールド姿勢から、IMU が出せる量だけ）。
+    const hq = this.headQuat();
+    const fwd = qRotate(hq, [1, 0, 0]); // 機体前方の向き
+    const lat = qRotate(hq, [0, 1, 0]); // 機体左方の向き
+    o[k++] = fwd[0]; // yaw 単位ベクトル x（生の頭向き＝うねりで振れる）
+    o[k++] = fwd[1]; // yaw 単位ベクトル y
+    o[k++] = fwd[2]; // ピッチ指標（鼻先の上下＝段差で持ち上がると +）
+    o[k++] = lat[2]; // ロール指標（機体横軸の上下）
+
+    // 頭IMU: 角速度（ジャイロ）。前ステップ→現ステップの頭姿勢差分を body frame で取り、制御周期で割る。
+    const relq = quatMul(quatConj(this.prevHeadQuat), hq); // body-frame の微小回転
+    const sign = relq[3] >= 0 ? 1 : -1; // double-cover を解消
+    const invDt = 1 / (this.controlPeriod * 5); // ≈±数rad/s を ~O(1) に正規化
+    o[k++] = 2 * sign * relq[0] * invDt; // ωx (roll rate)
+    o[k++] = 2 * sign * relq[1] * invDt; // ωy (pitch rate)
+    o[k++] = 2 * sign * relq[2] * invDt; // ωz (yaw rate)
+    this.prevHeadQuat = hq;
+
+    // 位相クロック（コントローラ内部時計）。
+    const ts = this.simSubstep * this.physicsDt;
+    o[k++] = Math.sin((2 * Math.PI * ts) / this.sim.period);
+    o[k++] = Math.cos((2 * Math.PI * ts) / this.sim.period);
+
+    // 目標ヘディング誤差（操舵指令）: 指令方位 − EMA フィルタした頭yaw。頭yaw はうねりで振れるので
+    // 単位ベクトルで EMA して平均方位（≈走行方位）を取り出し、指令との差を sin/cos で渡す。
+    const yawNow = Math.atan2(fwd[1], fwd[0]);
+    this.yawEmaCos += this.emaAlpha * (Math.cos(yawNow) - this.yawEmaCos);
+    this.yawEmaSin += this.emaAlpha * (Math.sin(yawNow) - this.yawEmaSin);
+    const yawFilt = Math.atan2(this.yawEmaSin, this.yawEmaCos);
+    const headErr = this.cmdHeadingRad - yawFilt;
+    o[k++] = Math.sin(headErr);
+    o[k++] = Math.cos(headErr);
 
     for (let i = 0; i < this.obsDim; i++) if (!Number.isFinite(o[i])) o[i] = 0;
     return o;

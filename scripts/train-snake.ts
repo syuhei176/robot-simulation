@@ -1,19 +1,17 @@
 /// <reference types="node" />
 /**
- * 3D 蛇（MuJoCo）の強化学習（Mac / Node オフライン）— 進行性地形の走破。
+ * 3D 蛇（MuJoCo）の強化学習（Mac / Node オフライン）— 実機センサー観測で「任意方位へ操舵しながら地形を走る」汎用方策。
  *   実行例:
- *     node scripts/train-snake.ts --iters 60 --motor mg996r                          # 進行性地形（障害物→階段→テーブル壁）
- *     node scripts/train-snake.ts --iters 80 --course challenge --episode-steps 1800 # 壁なし直進チャレンジ（基盤超え用）
- *     node scripts/train-snake.ts --iters 60 --course flat                           # 平地（比較・前進のみ）
- *
- * challenge コースは前進 x を壁でキャップしない。基盤歩容は地形に進行方向を蹴られて斜行し前進を浪費するので、
- * 横オフセット＋体軸ヘディング観測を使って +x へ操舵し直す閉ループ方策＝RL が基盤の前進量を明確に上回れる。
+ *     node scripts/train-snake.ts --course general --motor mg996r --iters 80 --episode-steps 1800  # コース汎用＋操舵
+ *     node scripts/train-snake.ts --course challenge --motor mg996r --iters 60                      # 単一コース（デバッグ）
  *
  * `SnakeEnv`（方策が n-1 関節の歩容残差を制御）を `Policy`+`PPO`（TF.js, CPU）で学習する。土台は前進登坂歩容
- * （alt-yaw-pitch・yaw前進＋pitch持ち上げ）＝**残差RL**。action=0 でも障害物＋階段を越えるので、方策は前方地形
- * プレビューを手がかりに「いつ・どの関節を余分に動かして段を越え・横ドリフトを抑えるか」を学ぶ。学習した方策の
- * 決定論ロールアウトを frames 記録して `public/policies/snake3d-<course>-<motor>.replay.json` に保存（ダッシュボード
- * の RL ボタンで TF.js 無し再生）。
+ * （alt-yaw-pitch・yaw前進＋pitch持ち上げ）＝**残差RL**。観測は実機相当（サーボ present position/velocity/load
+ * ＋頭IMU）で、目的地は**目標ヘディング指令（相対方位）**で条件付け。エピソード毎に地形（バンク）と目標方位
+ * （±headingMaxRad）をドメインランダム化し、報酬は「指令方向への前進 − 指令光線からの横ずれ − …」。
+ *
+ * 学習した方策の決定論ロールアウトを、各コース×離散方位 {−25°,0°,+25°} で frames 記録して
+ * `public/policies/snake3d-<course>-h<deg>-<motor>.replay.json` に保存（ダッシュボードの方位スライダーで再生）。
  */
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -31,7 +29,6 @@ import { Policy } from '../src/rl/Policy.ts';
 import { PPO, DEFAULT_PPO } from '../src/rl/PPO.ts';
 
 // 探索 std のアニーリング: 前半は探索を保ち、後半で縮小して決定論（mean）に性能を担わせる。
-// （std 固定だと方策が探索ノイズに依存し、確率的ロールアウトは良いのに det 評価が低く荒れる。）
 const LOGSTD_START = -0.9; // std≈0.41
 const LOGSTD_END = -2.3; // std≈0.10
 function annealLogStd(i: number, iters: number): number {
@@ -39,7 +36,17 @@ function annealLogStd(i: number, iters: number): number {
   return LOGSTD_START + (LOGSTD_END - LOGSTD_START) * frac;
 }
 
-/** 汎用性の評価・録画に使う名前付きコース（このどれでも基盤を下回らない単一方策を目指す）。 */
+/** 評価・録画に使う離散方位 [deg]（操舵を確認できる左/直進/右）。 */
+const EVAL_HEADINGS_DEG = [-25, 0, 25] as const;
+const DEG = Math.PI / 180;
+
+/** 録画ファイル名の方位タグ（h0 / hp25 / hm25）。 */
+function headTag(deg: number): string {
+  if (deg === 0) return 'h0';
+  return deg > 0 ? `hp${deg}` : `hm${-deg}`;
+}
+
+/** 汎用性の評価・録画に使う名前付きコース（このどれでも・どの方位でも操舵して走る単一方策を目指す）。 */
 const EVAL_COURSES: Array<{ name: string; terrain: () => SnakeTerrainBox[] }> = [
   { name: 'flat', terrain: () => [] },
   { name: 'progression', terrain: makeProgressionTerrain },
@@ -63,13 +70,12 @@ interface Options {
 
 function parseArgs(argv: string[]): Options {
   const opts: Options = {
-    iters: 60,
+    iters: 80,
     rollout: 2048,
     motor: 'mg996r',
-    course: 'progression',
-    episodeSteps: 1100, // 階段を登りきって踊り場→テーブルに到達できる長さ（基盤歩容で ~303cm）
-
-    hidden: 64,
+    course: 'general',
+    episodeSteps: 1800, // 段を登りきり踊り場を遠くまで走る長さ（斜め操舵でも地形上に乗る）
+    hidden: 96, // 観測が実機センサーで増えた（56次元）分の容量
     // 残差RLは報酬の振れ幅が大きく PPO が崩れやすい。lr を下げ entCoef を絞り（std 膨張を抑える）、
     // 勾配ノルムクリップ（PPO 側）＋初期 std 低下と併せて安定収束させる。
     lr: 1.5e-4,
@@ -117,68 +123,153 @@ function parseArgs(argv: string[]): Options {
   return opts;
 }
 
-/** 学習済み方策を決定論（平均行動）で1エピソード走らせ、前進量を測る。record でフレーム記録。 */
-function evaluate(
-  env: SnakeEnv,
-  policy: Policy,
-  record = false,
-): { forwardM: number; steps: number; fell: boolean } {
-  let obs = env.reset();
+interface EvalResult {
+  forwardM: number; // 指令方向への前進量 [m]
+  crossM: number; // 指令光線からの最終横ずれ [m]（操舵追従の誤差）
+  achievedDeg: number; // 達成方位 [deg]
+  steps: number;
+  fell: boolean;
+}
+
+/** 指令方位 headingRad で決定論（平均行動）ロールアウト。record でフレーム記録。 */
+function evaluate(env: SnakeEnv, policy: Policy, headingRad: number, record = false): EvalResult {
+  let obs = env.reset(undefined, headingRad);
   if (record) env.enableRecording();
-  const startX = env.progressMetric();
+  const startProj = env.progressMetric();
   let steps = 0;
   let done = false;
   let fell = false;
   while (!done) {
-    const action = policy.actMean(obs);
-    const res = env.step(action);
-    obs = res.obs;
-    done = res.done;
+    const r = env.step(policy.actMean(obs));
+    obs = r.obs;
+    done = r.done;
     steps++;
     if (done && steps < env.maxSteps) fell = true; // 早期終了＝数値破綻
   }
-  return { forwardM: env.progressMetric() - startX, steps, fell };
+  const [dx, dy] = env.getReplay().summary.netDispM;
+  const crossM = Math.abs(-dx * Math.sin(headingRad) + dy * Math.cos(headingRad));
+  return {
+    forwardM: env.progressMetric() - startProj,
+    crossM,
+    achievedDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
+    steps,
+    fell,
+  };
 }
 
-/** 基盤歩容（残差=0）を1エピソード走らせ、前進量と正味横ドリフトを測る（RL の比較対象）。 */
-function evaluateBase(env: SnakeEnv): { forwardM: number; dyM: number } {
-  env.reset();
-  const startX = env.progressMetric();
+/** 基盤歩容（残差=0）を指令方位で評価（操舵不可なので非0方位では指令方向前進が落ちる＝RL の上乗せが出る）。 */
+function evaluateBase(env: SnakeEnv, headingRad: number): EvalResult {
+  env.reset(undefined, headingRad);
+  const startProj = env.progressMetric();
   const zeros = new Float32Array(env.actDim);
   let done = false;
   while (!done) done = env.step(zeros).done;
-  return { forwardM: env.progressMetric() - startX, dyM: env.getReplay().summary.netDispM[1] };
+  const [dx, dy] = env.getReplay().summary.netDispM;
+  const crossM = Math.abs(-dx * Math.sin(headingRad) + dy * Math.cos(headingRad));
+  return {
+    forwardM: env.progressMetric() - startProj,
+    crossM,
+    achievedDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
+    steps: env.maxSteps,
+    fell: false,
+  };
 }
 
 const round5 = (_k: string, v: unknown): unknown =>
   typeof v === 'number' ? Number(v.toFixed(5)) : v;
 
-/**
- * コース汎用な単一方策を学習する。訓練 env は**地形バンク（ドメインランダム化）**で reset 毎にコースが変わる。
- * 評価は固定地形の名前付きコース（flat/progression/challenge）で行い、**どのコースでも基盤を下回らない**よう
- * 「コース横断の最小改善率」でベスト方策を選ぶ。最後に各コースで決定論ロールアウトを録画し、コースごとの
- * replay（同一の汎用方策）を保存する＝ダッシュボードでコースを切り替えても同じ方策が再生される。
- */
-async function trainGeneral(
-  opts: Options,
+/** 各コース×離散方位で eval 平均の選択スコア（前進が高く・横ずれが小さいほど良い）。 */
+function selectionScore(
+  evalEnvs: Array<{ name: string; env: SnakeEnv }>,
+  policy: Policy,
+): { score: number; note: string } {
+  let sum = 0;
+  let count = 0;
+  const parts: string[] = [];
+  for (const e of evalEnvs) {
+    for (const deg of EVAL_HEADINGS_DEG) {
+      const r = evaluate(e.env, policy, deg * DEG);
+      const v = r.fell ? -1 : r.forwardM - r.crossM; // 前進 − 追従誤差。破綻は強く減点
+      sum += v;
+      count++;
+      if (deg === 0) parts.push(`${e.name}=${(r.forwardM * 100).toFixed(0)}`);
+    }
+  }
+  return { score: count > 0 ? sum / count : -Infinity, note: parts.join(' ') };
+}
+
+/** 学習済み方策を各コース×離散方位で録画し、replay と manifest を書き出す（共通）。 */
+function recordCourses(
+  evalEnvs: Array<{ name: string; env: SnakeEnv }>,
+  policy: Policy,
   servo: ReturnType<typeof getServo>,
-  cap: number,
-): Promise<void> {
+  totalMass: number,
+  policyTag: string,
+): void {
+  mkdirSync(OUT_DIR, { recursive: true });
+  console.log('\n=== 結果（決定論評価・コース×方位） ===');
+  for (const e of evalEnvs) {
+    for (const deg of EVAL_HEADINGS_DEG) {
+      const rad = deg * DEG;
+      const base = evaluateBase(e.env, rad);
+      const res = evaluate(e.env, policy, rad, true);
+      const replay = e.env.getReplay();
+      const gainPct =
+        base.forwardM > 0 ? ((res.forwardM - base.forwardM) / base.forwardM) * 100 : 0;
+      console.log(
+        `  [${e.name.padEnd(11)} ${String(deg).padStart(3)}°] 基盤 ${(base.forwardM * 100).toFixed(0).padStart(4)}cm → ` +
+          `RL ${(res.forwardM * 100).toFixed(0).padStart(4)}cm (${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(0)}%) ` +
+          `達成方位 ${res.achievedDeg.toFixed(0)}° 横ずれ ${(res.crossM * 100).toFixed(0)}cm ${res.fell ? '破綻' : '完走'}`,
+      );
+      const meta = {
+        mechanism: 'snake3d',
+        course: e.name,
+        cmdHeadingDeg: deg, // 目標ヘディング指令（操舵）
+        motor: servo.id,
+        motorName: servo.name,
+        mass: totalMass,
+        base: 'climb-gait',
+        policy: policyTag,
+        forwardM: round4(res.forwardM),
+        baseForwardM: round4(base.forwardM),
+        achievedDeg: round4(res.achievedDeg),
+        crossM: round4(res.crossM),
+        fell: res.fell,
+      };
+      writeFileSync(
+        join(OUT_DIR, `snake3d-${e.name}-${headTag(deg)}-${servo.id}.replay.json`),
+        JSON.stringify({ meta, replay }, round5) + '\n',
+      );
+    }
+  }
+}
+
+async function main(): Promise<void> {
+  const opts = parseArgs(process.argv.slice(2));
+  const servo = getServo(opts.motor);
+  const cap = servo.stallNm;
   const motorOverride = { stiffness: 3, damping: 0.15, maxTorqueNm: cap };
 
-  // 訓練 env: 地形バンク（平地＋進行性＋直進チャレンジ＋ランダム変種）でランダム化。
+  await tf.setBackend('cpu');
+  await tf.ready();
+
+  // 訓練 env: general は地形バンク（ドメインランダム化）、単一コースは固定地形。方位は常に毎エピソードランダム化。
   const trainCfg = defaultSnakeEnvConfig({ motor: motorOverride });
   trainCfg.episodeSteps = opts.episodeSteps;
-  trainCfg.terrainBank = makeCourseBank();
+  if (opts.course === 'general') trainCfg.terrainBank = makeCourseBank();
+  else if (opts.course === 'flat') trainCfg.sim.terrain = [];
+  else if (opts.course === 'challenge') trainCfg.sim.terrain = makeStraightChallengeTerrain();
+  // progression は defaultSnakeEnvConfig の既定地形のまま。
   const trainEnv = await SnakeEnv.create(trainCfg);
 
-  // 評価 env: 各名前付きコースを固定地形で（訓練 env とは別インスタンス＝評価が学習ロールアウトを汚さない）。
-  const evalEnvs: Array<{ name: string; env: SnakeEnv; base: number }> = [];
-  for (const c of EVAL_COURSES) {
+  // 評価 env: 名前付きコースを固定地形で（general は全コース、単一コースはそのコースのみ）。
+  const evalCourseList =
+    opts.course === 'general' ? EVAL_COURSES : EVAL_COURSES.filter((c) => c.name === opts.course);
+  const evalEnvs: Array<{ name: string; env: SnakeEnv }> = [];
+  for (const c of evalCourseList) {
     const cfg = defaultSnakeEnvConfig({ terrain: c.terrain(), motor: motorOverride });
     cfg.episodeSteps = opts.episodeSteps;
-    const env = await SnakeEnv.create(cfg);
-    evalEnvs.push({ name: c.name, env, base: evaluateBase(env).forwardM });
+    evalEnvs.push({ name: c.name, env: await SnakeEnv.create(cfg) });
   }
 
   const policy = new Policy(trainEnv.obsDim, trainEnv.actDim, opts.hidden, LOGSTD_START);
@@ -192,16 +283,16 @@ async function trainGeneral(
   });
 
   console.log(
-    `=== 3D 蛇 RL (PPO) === コース=general（ドメインランダム化 ${trainCfg.terrainBank.length}地形）/ モーター=${servo.name} (cap ${cap.toFixed(3)} N·m)`,
+    `=== 3D 蛇 RL (PPO) === コース=${opts.course} / モーター=${servo.name} (cap ${cap.toFixed(3)} N·m) / 操舵±${(trainCfg.headingMaxRad / DEG).toFixed(0)}°`,
   );
   console.log(
     `  obsDim=${trainEnv.obsDim} actDim=${trainEnv.actDim} hidden=${opts.hidden} / rollout=${opts.rollout} episodeSteps=${opts.episodeSteps} / tf=${tf.getBackend()}`,
   );
-  console.log(
-    `  基盤(残差0): ` +
-      evalEnvs.map((e) => `${e.name} ${(e.base * 100).toFixed(0)}cm`).join(' / ') +
-      ' ← どのコースでも下回らない汎用方策を目指す',
-  );
+  // 基盤（残差0）の直進(0°)前進＝目安。
+  for (const e of evalEnvs) {
+    const b0 = evaluateBase(e.env, 0);
+    console.log(`  基盤(0°) ${e.name}: ${(b0.forwardM * 100).toFixed(0)}cm`);
+  }
 
   const history: Array<{ iter: number; return: number; forwardM: number; std: number }> = [];
   let bestScore = -Infinity;
@@ -221,20 +312,13 @@ async function trainGeneral(
     }
     let evalNote = '';
     if ((i + 1) % opts.evalEvery === 0 || i === opts.iters - 1) {
-      const fwds = evalEnvs.map((e) => {
-        const ev = evaluate(e.env, policy);
-        return ev.fell ? 0 : ev.forwardM;
-      });
-      const ratios = fwds.map((f, k) => (evalEnvs[k].base > 0 ? f / evalEnvs[k].base : f));
-      // 最小改善率（最悪コースを下回らない）を主、平均でタイブレーク＝どのコースも壊さない方策を選ぶ。
-      const score =
-        Math.min(...ratios) + 0.05 * (ratios.reduce((a, b) => a + b, 0) / ratios.length);
+      const { score, note } = selectionScore(evalEnvs, policy);
       if (score > bestScore) {
         bestScore = score;
         bestWeights = policy.exportWeights();
       }
-      evalNote =
-        ' | ' + evalEnvs.map((e, k) => `${e.name}=${(fwds[k] * 100).toFixed(0)}`).join(' ');
+      ppo.resetRollout(); // 評価で env を reset したので学習ロールアウトの継続状態を破棄（整合）
+      evalNote = ` | 0°: ${note} (score ${score.toFixed(2)})`;
     }
     console.log(
       `  iter ${String(s.iteration).padStart(3)}: return=${s.meanEpisodeReturn.toFixed(2).padStart(8)} ` +
@@ -242,204 +326,42 @@ async function trainGeneral(
     );
   }
 
-  // ---- 各コースで決定論ロールアウトを録画して保存（同一の汎用方策） ----
+  // ---- ベスト方策で各コース×方位を録画・保存 ----
   policy.importWeights(bestWeights);
-  mkdirSync(OUT_DIR, { recursive: true });
-  console.log('\n=== 結果（汎用方策・決定論評価） ===');
-  for (const e of evalEnvs) {
-    const res = evaluate(e.env, policy, true);
-    const replay = e.env.getReplay();
-    const gainPct = e.base > 0 ? ((res.forwardM - e.base) / e.base) * 100 : 0;
-    console.log(
-      `  [${e.name.padEnd(11)}] 基盤 ${(e.base * 100).toFixed(0)}cm → RL ${(res.forwardM * 100).toFixed(0)}cm ` +
-        `(${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(0)}%) ${res.fell ? '破綻' : '完走'}`,
-    );
-    const meta = {
-      mechanism: 'snake3d',
-      course: e.name,
-      motor: servo.id,
-      motorName: servo.name,
-      mass: trainCfg.sim.totalMass,
-      base: 'climb-gait',
-      policy: 'general', // 単一の汎用方策（全コース共通）の録画であることを示す
-      forwardM: round4(res.forwardM),
-      baseForwardM: round4(e.base),
-      fell: res.fell,
-    };
-    writeFileSync(
-      join(OUT_DIR, `snake3d-${e.name}-${servo.id}.replay.json`),
-      JSON.stringify({ meta, replay }, round5) + '\n',
-    );
-  }
+  const policyTag = opts.course === 'general' ? 'general' : opts.course;
+  recordCourses(evalEnvs, policy, servo, trainCfg.sim.totalMass, policyTag);
 
-  // 汎用方策の重み（全コース共通）を1ファイルに保存。
+  // 方策の重み（全コース・全方位共通の単一方策）を1ファイルに保存。
+  const weightsStem = opts.course === 'general' ? 'snake3d-general' : `snake3d-${opts.course}`;
   writeFileSync(
-    join(OUT_DIR, `snake3d-general-${servo.id}.json`),
+    join(OUT_DIR, `${weightsStem}-${servo.id}.json`),
     JSON.stringify({
       kind: 'rl-policy',
       mechanism: 'snake3d',
-      course: 'general',
+      course: opts.course,
       motor: servo.id,
       motorName: servo.name,
       obsDim: trainEnv.obsDim,
       actDim: trainEnv.actDim,
       hidden: opts.hidden,
+      headingMaxDeg: trainCfg.headingMaxRad / DEG,
       weights: bestWeights,
       history,
       config: {
         iters: opts.iters,
         rollout: opts.rollout,
         lr: opts.lr,
-        bank: trainCfg.terrainBank.length,
+        bank: trainCfg.terrainBank?.length ?? 1,
       },
     }) + '\n',
   );
   rebuildPolicyManifest();
   console.log(
-    `\n  書き出し: 各コース snake3d-<course>-${servo.id}.replay.json（同一汎用方策）＋ snake3d-general-${servo.id}.json（+ manifest）`,
+    `\n  書き出し: 各コース×方位 snake3d-<course>-h<deg>-${servo.id}.replay.json ＋ ${weightsStem}-${servo.id}.json（+ manifest）`,
   );
 
   trainEnv.dispose();
   for (const e of evalEnvs) e.env.dispose();
-  policy.dispose();
-  ppo.dispose();
-}
-
-async function main(): Promise<void> {
-  const opts = parseArgs(process.argv.slice(2));
-  const servo = getServo(opts.motor);
-  const cap = servo.stallNm;
-
-  await tf.setBackend('cpu');
-  await tf.ready();
-
-  if (opts.course === 'general') {
-    await trainGeneral(opts, servo, cap);
-    return;
-  }
-
-  // progression は既定の進行性地形、flat は地形なし。terrain:undefined を渡すと既定を消すので分岐する。
-  const simOverrides: Parameters<typeof defaultSnakeEnvConfig>[0] = {
-    motor: { stiffness: 3, damping: 0.15, maxTorqueNm: cap },
-  };
-  if (opts.course === 'flat') simOverrides.terrain = [];
-  else if (opts.course === 'challenge') simOverrides.terrain = makeStraightChallengeTerrain();
-  const envCfg = defaultSnakeEnvConfig(simOverrides);
-  envCfg.episodeSteps = opts.episodeSteps;
-
-  const env = await SnakeEnv.create(envCfg);
-  const policy = new Policy(env.obsDim, env.actDim, opts.hidden, LOGSTD_START);
-  const ppo = new PPO(policy, {
-    ...DEFAULT_PPO,
-    rolloutSteps: opts.rollout,
-    lr: opts.lr,
-    entCoef: opts.entCoef,
-    minibatch: 256,
-    epochs: 4,
-  });
-
-  console.log(
-    `=== 3D 蛇 RL (PPO) === コース=${opts.course} / モーター=${servo.name} (cap ${cap.toFixed(3)} N·m)`,
-  );
-  console.log(
-    `  obsDim=${env.obsDim} actDim=${env.actDim} hidden=${opts.hidden} / rollout=${opts.rollout} episodeSteps=${opts.episodeSteps} / tf=${tf.getBackend()}`,
-  );
-
-  // 基盤歩容（残差=0・開ループ）の前進量＝RL が超えるべき基準線。
-  const base = evaluateBase(env);
-  console.log(
-    `  基盤歩容（残差0）: 前進 ${(base.forwardM * 100).toFixed(1)}cm / 横ドリフト dy=${(base.dyM * 100).toFixed(1)}cm ← これを超える`,
-  );
-
-  interface HistRow {
-    iter: number;
-    return: number;
-    forwardM: number;
-    std: number;
-  }
-  const history: HistRow[] = [];
-  let bestEvalForward = -Infinity;
-  let bestWeights = policy.exportWeights();
-
-  for (let i = 0; i < opts.iters; i++) {
-    policy.setLogStd(annealLogStd(i, opts.iters)); // 探索 std をスケジュールに沿って縮小
-    const s = ppo.runIteration(env);
-    history.push({
-      iter: s.iteration,
-      return: round4(s.meanEpisodeReturn),
-      forwardM: round4(s.meanEpisodeForward),
-      std: round4(s.std),
-    });
-    if (!Number.isFinite(s.policyLoss) || !Number.isFinite(s.valueLoss)) {
-      throw new Error('損失が NaN/Inf になりました（学習発散）');
-    }
-    let evalNote = '';
-    if ((i + 1) % opts.evalEvery === 0 || i === opts.iters - 1) {
-      const ev = evaluate(env, policy);
-      const det = ev.fell ? -1 : ev.forwardM;
-      if (det > bestEvalForward) {
-        bestEvalForward = det;
-        bestWeights = policy.exportWeights();
-      }
-      ppo.resetRollout(); // 評価で env を reset したので学習ロールアウトの継続状態を破棄（整合）
-      evalNote = ` | det=${(ev.forwardM * 100).toFixed(1)}cm${ev.fell ? '(破綻)' : ''}`;
-    }
-    console.log(
-      `  iter ${String(s.iteration).padStart(3)}: return=${s.meanEpisodeReturn.toFixed(3).padStart(8)} ` +
-        `forward=${(s.meanEpisodeForward * 100).toFixed(1).padStart(7)}cm pLoss=${s.policyLoss.toFixed(4)} vLoss=${s.valueLoss.toFixed(3)} std=${s.std.toFixed(3)}${evalNote}`,
-    );
-  }
-
-  policy.importWeights(bestWeights);
-  const evalRes = evaluate(env, policy, true);
-  const replay = env.getReplay();
-  const gainCm = (evalRes.forwardM - base.forwardM) * 100;
-  const gainPct = base.forwardM > 0 ? (gainCm / (base.forwardM * 100)) * 100 : 0;
-  console.log('');
-  console.log(
-    `=== 結果 === 決定論評価: 前進 ${(evalRes.forwardM * 100).toFixed(1)}cm / ${evalRes.steps}ステップ / ${evalRes.fell ? '破綻' : '完走'}`,
-  );
-  console.log(
-    `  基盤 ${(base.forwardM * 100).toFixed(1)}cm → RL ${(evalRes.forwardM * 100).toFixed(1)}cm ` +
-      `（${gainCm >= 0 ? '+' : ''}${gainCm.toFixed(1)}cm / ${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(0)}%）` +
-      `／RL 横ドリフト dy=${(replay.summary.netDispM[1] * 100).toFixed(1)}cm（基盤 ${(base.dyM * 100).toFixed(1)}cm）`,
-  );
-
-  // ---- 書き出し ----
-  const meta = {
-    mechanism: 'snake3d',
-    course: opts.course,
-    motor: servo.id,
-    motorName: servo.name,
-    mass: envCfg.sim.totalMass,
-    base: 'climb-gait',
-    forwardM: round4(evalRes.forwardM),
-    baseForwardM: round4(base.forwardM), // 基盤歩容（残差0）の前進量＝RL が超えた基準線
-    fell: evalRes.fell,
-  };
-  mkdirSync(OUT_DIR, { recursive: true });
-  const stem = `snake3d-${opts.course}-${servo.id}`;
-  writeFileSync(
-    join(OUT_DIR, `${stem}.json`),
-    JSON.stringify({
-      kind: 'rl-policy',
-      ...meta,
-      obsDim: env.obsDim,
-      actDim: env.actDim,
-      hidden: opts.hidden,
-      weights: bestWeights,
-      history,
-      config: { iters: opts.iters, rollout: opts.rollout, lr: opts.lr },
-    }) + '\n',
-  );
-  writeFileSync(
-    join(OUT_DIR, `${stem}.replay.json`),
-    JSON.stringify({ meta, replay }, round5) + '\n',
-  );
-  rebuildPolicyManifest();
-  console.log(`  書き出し: public/policies/${stem}.json + ${stem}.replay.json（+ manifest.json）`);
-
-  env.dispose();
   policy.dispose();
   ppo.dispose();
 }

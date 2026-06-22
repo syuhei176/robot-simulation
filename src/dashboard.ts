@@ -49,6 +49,9 @@ const btnRL = el<HTMLButtonElement>('btn-rl');
 const tunedInfo = el<HTMLDivElement>('tuned-info');
 const linkMaterials = el<HTMLAnchorElement>('link-materials');
 const courseRow = selCourse.parentElement as HTMLDivElement; // sel-course を含む .row
+const headingCtl = el<HTMLDivElement>('heading-ctl'); // 操舵スライダーの容れ物（RL モードのみ表示）
+const headingInput = el<HTMLInputElement>('s-heading');
+const headingValue = el<HTMLSpanElement>('v-heading');
 
 // ---- RL 方策（オフライン PPO の成果物・決定論ロールアウトの記録）の型 ----
 /** public/policies/manifest.json の1エントリ。 */
@@ -61,6 +64,8 @@ interface PolicyManifestEntry {
   base: string;
   forwardM: number;
   baseForwardM?: number; // 基盤歩容（残差0）の前進量。あれば「基盤→RL」の上乗せを表示する
+  cmdHeadingDeg?: number; // 目標ヘディング指令（操舵）[deg]。無ければ 0（直進）扱い
+  achievedDeg?: number; // 達成方位（実測）[deg]
   fell: boolean;
 }
 /** public/policies/<file>.replay.json（meta + 記録リプレイ）。 */
@@ -80,6 +85,7 @@ const UI_MECHANISMS = MECHANISMS;
 let mechId = UI_MECHANISMS[0].id;
 let courseId: CourseId = 'challenge';
 let motorId = 'mg996r';
+let commandHeadingDeg = 0; // RL 方策に与える目標方位（操舵）。最近傍の録画方位を再生する
 let torqueCapNm = getServo(motorId).stallNm;
 let paramValues: Record<string, number> = defaultParamValues(getMechanism(mechId));
 let replay: MechReplay | null = null;
@@ -207,12 +213,19 @@ function effectiveCourse(): string {
   return mech.supportsCourse ? courseId : 'flat';
 }
 
-/** 現在の 機構×コース×モーター に対応する RL 方策（記録リプレイ）を policy manifest から探す。 */
-function findPolicyEntry(): PolicyManifestEntry | null {
-  return (
-    policyManifest.find(
-      (e) => e.mechanism === mechId && e.motor === motorId && e.course === effectiveCourse(),
-    ) ?? null
+/** 現在の 機構×コース×モーター に対応する RL 方策（記録リプレイ）を全方位ぶん集める。 */
+function findPolicyEntries(): PolicyManifestEntry[] {
+  return policyManifest.filter(
+    (e) => e.mechanism === mechId && e.motor === motorId && e.course === effectiveCourse(),
+  );
+}
+
+/** 目標方位 deg に最も近い録画方位のエントリを選ぶ（操舵スライダー用）。無ければ null。 */
+function pickPolicyEntry(deg: number): PolicyManifestEntry | null {
+  const entries = findPolicyEntries();
+  if (entries.length === 0) return null;
+  return entries.reduce((best, e) =>
+    Math.abs((e.cmdHeadingDeg ?? 0) - deg) < Math.abs((best.cmdHeadingDeg ?? 0) - deg) ? e : best,
   );
 }
 
@@ -228,11 +241,15 @@ async function loadPolicyReplay(entry: PolicyManifestEntry): Promise<PolicyRepla
 
 /** scripted/RL ボタンの有効/無効と選択状態を同期する（RL が無いコースを選んでいたら scripted に戻す）。 */
 function updateModeAvailability(): void {
-  const hasPolicy = findPolicyEntry() !== null;
+  const hasPolicy = findPolicyEntries().length > 0;
   btnRL.disabled = !hasPolicy;
   if (motionMode === 'rl' && !hasPolicy) motionMode = 'scripted';
   btnScripted.classList.toggle('active', motionMode === 'scripted');
   btnRL.classList.toggle('active', motionMode === 'rl');
+  // 操舵スライダーは RL 方策があり RL モードの時だけ表示（基盤歩容は +x のみで操舵できない）。
+  headingCtl.style.display = motionMode === 'rl' && hasPolicy ? '' : 'none';
+  headingValue.textContent = `${commandHeadingDeg > 0 ? '+' : ''}${commandHeadingDeg}°`;
+  headingInput.value = String(commandHeadingDeg);
 }
 
 function syncTorqueUI(): void {
@@ -328,7 +345,7 @@ function scheduleRun(): void {
 
 // ---- RL: 記録済みリプレイ（決定論ロールアウトの frames）を読み込んで再生する ----
 async function runRL(): Promise<void> {
-  const entry = findPolicyEntry();
+  const entry = pickPolicyEntry(commandHeadingDeg);
   if (!entry) {
     motionMode = 'scripted';
     await reload();
@@ -340,16 +357,22 @@ async function runRL(): Promise<void> {
   if (seq !== loadSeq) return; // 競合ガード
   torqueCapNm = getServo(motorId).stallNm;
   syncTorqueUI();
-  // 基盤歩容（残差0）の記録があれば「基盤→RL（+N%）」で上乗せを明示する。
+  // 操舵指令（目標方位）と達成方位を見せつつ、基盤→RL（+N%）の上乗せを明示する。
+  const cmdDeg = entry.cmdHeadingDeg ?? 0;
+  const cmdStr = `目標方位 ${cmdDeg > 0 ? '+' : ''}${cmdDeg}°`;
+  const achStr =
+    entry.achievedDeg !== undefined
+      ? ` → 実方位 ${entry.achievedDeg > 0 ? '+' : ''}${entry.achievedDeg.toFixed(0)}°`
+      : '';
   const rlCm = entry.forwardM * 100;
   if (entry.baseForwardM !== undefined && entry.baseForwardM > 0) {
     const baseCm = entry.baseForwardM * 100;
     const pct = ((rlCm - baseCm) / baseCm) * 100;
     tunedInfo.textContent =
-      `RL 方策（土台=${entry.base}）・基盤 ${baseCm.toFixed(0)}cm → RL ${rlCm.toFixed(0)}cm ` +
+      `RL方策 ${cmdStr}${achStr}・基盤 ${baseCm.toFixed(0)}cm → RL ${rlCm.toFixed(0)}cm ` +
       `(${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%)${entry.fell ? '（破綻）' : ''}`;
   } else {
-    tunedInfo.textContent = `RL 方策（土台=${entry.base}）・前進 ${rlCm.toFixed(0)}cm${entry.fell ? '（破綻）' : ''}`;
+    tunedInfo.textContent = `RL方策 ${cmdStr}${achStr}・前進 ${rlCm.toFixed(0)}cm${entry.fell ? '（破綻）' : ''}`;
   }
   buildParamSliders();
   const rl = recordedSnake3DReplay(
@@ -419,6 +442,11 @@ btnRL.addEventListener('click', () => {
   if (motionMode === 'rl' || btnRL.disabled) return;
   motionMode = 'rl';
   void reload();
+});
+headingInput.addEventListener('input', () => {
+  commandHeadingDeg = Number(headingInput.value);
+  headingValue.textContent = `${commandHeadingDeg > 0 ? '+' : ''}${commandHeadingDeg}°`;
+  if (motionMode === 'rl') void runRL(); // 最近傍の録画方位を再生（fetch はキャッシュ）
 });
 torqueCapInput.addEventListener('input', () => {
   torqueCapNm = Number(torqueCapInput.value);

@@ -1,10 +1,10 @@
 /// <reference types="node" />
 /**
- * 保存済み RL 方策（public/policies/<stem>.json）を再ロードし、決定論ロールアウトで前進量を測って
- * 基盤歩容（残差0）と比較する。「RL が基盤を超えた」が再現する成果物であることの検証。
+ * 保存済み RL 方策（public/policies/<stem>.json）を再ロードし、各コース×離散方位で決定論ロールアウトして
+ * 「指令方向への前進」「達成方位が指令に追従（＝操舵できている）」「再現性」を基盤歩容と比較検証する。
  *
- *   node scripts/verify-policy.ts                 # 既定 snake3d-challenge-mg996r
- *   node scripts/verify-policy.ts --stem snake3d-challenge-mg996r
+ *   node scripts/verify-policy.ts                              # 既定 snake3d-general-mg996r
+ *   node scripts/verify-policy.ts --stem snake3d-general-mg996r
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -25,6 +25,8 @@ const NAMED_COURSES: Record<string, () => SnakeTerrainBox[]> = {
   progression: makeProgressionTerrain,
   challenge: makeStraightChallengeTerrain,
 };
+const EVAL_HEADINGS_DEG = [-25, 0, 25] as const;
+const DEG = Math.PI / 180;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -35,29 +37,33 @@ interface PolicyFile {
   actDim: number;
   hidden: number;
   weights: { policy: number[][]; value: number[][]; logStd: number[] };
-  baseForwardM?: number;
-  forwardM: number;
 }
 
-function evalDet(env: SnakeEnv, policy: Policy): { forwardM: number; dyM: number } {
-  let obs = env.reset();
-  const startX = env.progressMetric();
+interface RolloutResult {
+  forwardM: number;
+  crossM: number;
+  achievedDeg: number;
+}
+
+function rollout(
+  env: SnakeEnv,
+  headingRad: number,
+  act: (obs: Float32Array) => Float32Array,
+): RolloutResult {
+  let obs = env.reset(undefined, headingRad);
+  const startProj = env.progressMetric();
   let done = false;
   while (!done) {
-    const res = env.step(policy.actMean(obs));
-    obs = res.obs;
-    done = res.done;
+    const r = env.step(act(obs));
+    obs = r.obs;
+    done = r.done;
   }
-  return { forwardM: env.progressMetric() - startX, dyM: env.getReplay().summary.netDispM[1] };
-}
-
-function evalBase(env: SnakeEnv): { forwardM: number; dyM: number } {
-  env.reset();
-  const startX = env.progressMetric();
-  const zeros = new Float32Array(env.actDim);
-  let done = false;
-  while (!done) done = env.step(zeros).done;
-  return { forwardM: env.progressMetric() - startX, dyM: env.getReplay().summary.netDispM[1] };
+  const [dx, dy] = env.getReplay().summary.netDispM;
+  return {
+    forwardM: env.progressMetric() - startProj,
+    crossM: Math.abs(-dx * Math.sin(headingRad) + dy * Math.cos(headingRad)),
+    achievedDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
+  };
 }
 
 async function main(): Promise<void> {
@@ -75,11 +81,11 @@ async function main(): Promise<void> {
 
   const policy = new Policy(file.obsDim, file.actDim, file.hidden);
   policy.importWeights(file.weights);
+  const zeros = new Float32Array(file.actDim);
 
   console.log(`=== 検証: ${stem} === 学習コース=${file.course} / モーター=${servo.name}`);
-  console.log(`  名前付きコースで横断評価（汎用性の確認）。RL は基盤(残差0)を各コースで上回るか:`);
+  console.log(`  各コース×方位で「指令方向前進・達成方位の追従・再現性」を基盤(残差0)と比較:`);
 
-  // 名前付きコースを横断して、同一方策が各コースで基盤を上回るかを見る（汎用性）。
   for (const [name, makeTerrain] of Object.entries(NAMED_COURSES)) {
     const envCfg = defaultSnakeEnvConfig({
       terrain: makeTerrain(),
@@ -87,16 +93,22 @@ async function main(): Promise<void> {
     });
     envCfg.episodeSteps = 1800;
     const env = await SnakeEnv.create(envCfg);
-    const r1 = evalDet(env, policy);
-    const r2 = evalDet(env, policy);
-    const base = evalBase(env);
-    const repro = Math.abs(r1.forwardM - r2.forwardM) < 1e-6 ? 'OK' : '不一致';
-    const gainPct = base.forwardM !== 0 ? ((r1.forwardM - base.forwardM) / base.forwardM) * 100 : 0;
-    const verdict = r1.forwardM > base.forwardM ? '上回る ✅' : '下回る ❌';
-    console.log(
-      `  [${name.padEnd(11)}] 基盤 ${(base.forwardM * 100).toFixed(0).padStart(4)}cm → RL ${(r1.forwardM * 100).toFixed(0).padStart(4)}cm ` +
-        `(${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(0)}%) ${verdict} ｜ dy 基盤 ${(base.dyM * 100).toFixed(0)} / RL ${(r1.dyM * 100).toFixed(0)}cm（再現 ${repro}）`,
-    );
+    for (const deg of EVAL_HEADINGS_DEG) {
+      const rad = deg * DEG;
+      const r1 = rollout(env, rad, (o) => policy.actMean(o));
+      const r2 = rollout(env, rad, (o) => policy.actMean(o));
+      const base = rollout(env, rad, () => zeros);
+      const repro = Math.abs(r1.forwardM - r2.forwardM) < 1e-6 ? 'OK' : '不一致';
+      const gainPct =
+        base.forwardM !== 0 ? ((r1.forwardM - base.forwardM) / base.forwardM) * 100 : 0;
+      const steer =
+        Math.abs(r1.achievedDeg - deg) < Math.abs(base.achievedDeg - deg) ? '操舵✅' : '—';
+      console.log(
+        `  [${name.padEnd(11)} 指令${String(deg).padStart(3)}°] 基盤 ${(base.forwardM * 100).toFixed(0).padStart(4)}cm(方位${base.achievedDeg.toFixed(0)}°) → ` +
+          `RL ${(r1.forwardM * 100).toFixed(0).padStart(4)}cm(方位${r1.achievedDeg.toFixed(0)}°/${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(0)}%) ` +
+          `横ずれ ${(r1.crossM * 100).toFixed(0)}cm ${steer}（再現${repro}）`,
+      );
+    }
     env.dispose();
   }
 
