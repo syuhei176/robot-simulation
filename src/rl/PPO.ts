@@ -12,6 +12,8 @@ export interface PPOConfig {
   minibatch: number;
   vfCoef: number;
   entCoef: number;
+  maxGradNorm: number; // 勾配のグローバルノルム上限（PPO の発散を防ぐ標準の安定化。0 以下で無効）
+  targetKL: number; // 近似 KL がこの値を超えたらエポックを早期終了（破壊的更新で方策が崩れるのを防ぐ。0 以下で無効）
 }
 
 export const DEFAULT_PPO: PPOConfig = {
@@ -24,6 +26,8 @@ export const DEFAULT_PPO: PPOConfig = {
   minibatch: 256,
   vfCoef: 0.5,
   entCoef: 0.005,
+  maxGradNorm: 0.5,
+  targetKL: 0.02,
 };
 
 export interface IterationStats {
@@ -55,6 +59,14 @@ export class PPO {
     this.obsDim = policy.obsDim;
     this.actDim = policy.actDim;
     this.optimizer = tf.train.adam(cfg.lr);
+  }
+
+  /**
+   * ロールアウトの継続状態を破棄する。学習と同じ env で評価（env.reset を伴う）を挟むと、保持中の
+   * curObs が env の実状態とズレる。評価後にこれを呼べば次イテレーションが env.reset から再開し整合する。
+   */
+  resetRollout(): void {
+    this.curObs = null;
   }
 
   /** 1 イテレーション: ロールアウト収集 → GAE → PPO 更新。 */
@@ -168,6 +180,8 @@ export class PPO {
 
     for (let epoch = 0; epoch < this.cfg.epochs; epoch++) {
       shuffle(idx);
+      let klSum = 0;
+      let klCount = 0;
       for (let start = 0; start < T; start += this.cfg.minibatch) {
         const mbIdx = idx.slice(start, start + this.cfg.minibatch);
         const idxT = tf.tensor1d(mbIdx, 'int32');
@@ -178,9 +192,11 @@ export class PPO {
         const advMB = advT.gather(idxT) as tf.Tensor1D;
         const retMB = retT.gather(idxT) as tf.Tensor1D;
 
-        const { plScalar, vlScalar } = this.gradientStep(oMB, aMB, lpMB, advMB, retMB);
+        const { plScalar, vlScalar, klScalar } = this.gradientStep(oMB, aMB, lpMB, advMB, retMB);
         lastPolicyLoss = plScalar;
         lastValueLoss = vlScalar;
+        klSum += klScalar;
+        klCount++;
 
         idxT.dispose();
         oMB.dispose();
@@ -189,6 +205,8 @@ export class PPO {
         advMB.dispose();
         retMB.dispose();
       }
+      // エポック平均の近似 KL が目標を超えたら以降のエポックを打ち切る（破壊的更新の回避）。
+      if (this.cfg.targetKL > 0 && klCount > 0 && klSum / klCount > this.cfg.targetKL) break;
     }
 
     obsT.dispose();
@@ -200,17 +218,18 @@ export class PPO {
     return { policyLoss: lastPolicyLoss, valueLoss: lastValueLoss };
   }
 
-  /** 1 ミニバッチの勾配ステップ。損失値(JS数値)を返す。 */
+  /** 1 ミニバッチの勾配ステップ（グローバルノルムでクリップしてから適用）。損失値(JS数値)を返す。 */
   private gradientStep(
     obs: tf.Tensor2D,
     act: tf.Tensor2D,
     oldLogp: tf.Tensor1D,
     adv: tf.Tensor1D,
     ret: tf.Tensor1D,
-  ): { plScalar: number; vlScalar: number } {
+  ): { plScalar: number; vlScalar: number; klScalar: number } {
     let pl = 0;
     let vl = 0;
-    const cost = this.optimizer.minimize(() => {
+    let kl = 0;
+    const lossFn = (): tf.Scalar => {
       const { logProb, value, entropy } = this.policy.evaluate(obs, act);
       const ratio = tf.exp(logProb.sub(oldLogp));
       const surr1 = ratio.mul(adv);
@@ -220,12 +239,19 @@ export class PPO {
       const entLoss = entropy.mul(-1) as tf.Scalar;
       pl = policyLoss.dataSync()[0];
       vl = valueLoss.dataSync()[0];
+      kl = oldLogp.sub(logProb).mean().dataSync()[0]; // 近似 KL（old−new の平均）
       return policyLoss
         .add(valueLoss.mul(this.cfg.vfCoef))
         .add(entLoss.mul(this.cfg.entCoef)) as tf.Scalar;
-    }, true);
-    cost?.dispose();
-    return { plScalar: pl, vlScalar: vl };
+    };
+    const { value: lossVal, grads } = tf.variableGrads(lossFn);
+    const applied =
+      this.cfg.maxGradNorm > 0 ? clipByGlobalNorm(grads, this.cfg.maxGradNorm) : grads;
+    this.optimizer.applyGradients(applied);
+    lossVal.dispose();
+    for (const k of Object.keys(grads)) grads[k].dispose();
+    if (applied !== grads) for (const k of Object.keys(applied)) applied[k].dispose();
+    return { plScalar: pl, vlScalar: vl, klScalar: kl };
   }
 
   dispose(): void {
@@ -238,4 +264,18 @@ function shuffle(a: number[]): void {
     const j = Math.floor(Math.random() * (i + 1));
     [a[i], a[j]] = [a[j], a[i]];
   }
+}
+
+/** 勾配群をグローバル L2 ノルムで maxNorm 以下にスケールする（TF.js の Adam にクリップが無いので手で）。 */
+function clipByGlobalNorm(grads: tf.NamedTensorMap, maxNorm: number): tf.NamedTensorMap {
+  return tf.tidy(() => {
+    let sumSq = tf.scalar(0);
+    for (const k of Object.keys(grads)) sumSq = sumSq.add(grads[k].square().sum());
+    const globalNorm = sumSq.sqrt();
+    // scale = min(1, maxNorm/globalNorm) を maxNorm/max(globalNorm, maxNorm) で表現（分母 0 回避）。
+    const scale = tf.scalar(maxNorm).div(tf.maximum(globalNorm, tf.scalar(maxNorm)));
+    const out: tf.NamedTensorMap = {};
+    for (const k of Object.keys(grads)) out[k] = grads[k].mul(scale);
+    return out;
+  });
 }

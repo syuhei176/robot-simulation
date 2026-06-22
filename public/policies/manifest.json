@@ -1,24 +1,28 @@
 [
   {
-    "file": "quad-combined-sts3215.replay.json",
-    "mechanism": "quad",
-    "course": "combined",
-    "motor": "sts3215",
-    "motorName": "Feetech STS3215 (12V)",
-    "mass": 1.2,
-    "base": "tuned歩容(quad-combined-sts3215.json)",
-    "forwardM": 2.4132,
+    "file": "snake3d-challenge-mg996r.replay.json",
+    "mechanism": "snake3d",
+    "course": "challenge",
+    "motor": "mg996r",
+    "motorName": "MG996R (6V)",
+    "mass": 0.6,
+    "base": "climb-gait",
+    "policy": "general",
+    "forwardM": 8.3912,
+    "baseForwardM": 5.5541,
     "fell": false
   },
   {
-    "file": "quad-flat-scs0009.replay.json",
-    "mechanism": "quad",
+    "file": "snake3d-flat-mg996r.replay.json",
+    "mechanism": "snake3d",
     "course": "flat",
-    "motor": "scs0009",
-    "motorName": "Feetech SCS0009 (6V)",
-    "mass": 0.15,
-    "base": "tuned歩容(quad-flat-scs0009.json)",
-    "forwardM": 0.5404,
+    "motor": "mg996r",
+    "motorName": "MG996R (6V)",
+    "mass": 0.6,
+    "base": "climb-gait",
+    "policy": "general",
+    "forwardM": 9.482,
+    "baseForwardM": 9.4272,
     "fell": false
   },
   {
@@ -29,7 +33,9 @@
     "motorName": "MG996R (6V)",
     "mass": 0.6,
     "base": "climb-gait",
-    "forwardM": 3.0332,
+    "policy": "general",
+    "forwardM": 3.7046,
+    "baseForwardM": 3.4773,
     "fell": false
   }
 ]

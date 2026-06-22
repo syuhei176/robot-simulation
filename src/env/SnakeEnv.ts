@@ -23,17 +23,23 @@ import {
   type SnakeBodyLayout,
   type Snake3DReplay,
   type SnakeFrame,
+  type SnakeTerrainBox,
 } from '../sim3d/snake3d-dynamics.ts';
 import type { RLEnv, StepResult } from '../rl/RLEnv.ts';
 
 export interface SnakeEnvConfig {
   sim: Snake3DConfig; // 身体・歩容・地形・モータ（既定は進行性地形＋前進登坂歩容）
+  // ドメインランダム化用の地形バンク（任意）。指定すると reset 毎にこの中から1つをランダムに選ぶ
+  //（各地形のモデルを事前コンパイルして保持）。コース汎用な単一方策を学習するために使う。未指定なら sim.terrain 固定。
+  terrainBank?: SnakeTerrainBox[][];
   episodeSteps: number; // 1 エピソードの制御ステップ数
   controlFrames: number; // 1 制御ステップが含む sim.dt フレーム数（制御周期 = controlFrames·dt）
   maxJointDelta: number; // 関節残差の可動幅 [rad]（土台ターゲット中心の ±）
   previewOffsets: number[]; // 前方地形プレビューの COM 前方オフセット [m]
   forwardReward: number; // 前進(+x)量への係数
-  lateralPenalty: number; // 横ドリフト |Δy| への係数（まっすぐ進ませる）
+  lateralPenalty: number; // 横ドリフト速度 |Δy| への係数（うねりの横揺れを軽く抑える）
+  centerlinePenalty: number; // センターライン（開始 y）からの絶対オフセット |y−y0| への係数（直進補正）
+  centerlineCap: number; // センターライン罰を頭打ちにする距離 [m]（学習初期の暴走防止）
   energyPenalty: number; // 行動エネルギー（残差二乗平均）への係数
   satPenalty: number; // トルク飽和率への係数
   aliveBonus: number; // 生存ボーナス
@@ -58,10 +64,16 @@ export function defaultSnakeEnvConfig(overrides: Partial<Snake3DConfig> = {}): S
     sim,
     episodeSteps: 500,
     controlFrames: 5, // 制御周期 = 5/240 ≈ 48 Hz
-    maxJointDelta: 0.3,
+    // 残差幅。残差RLは action=0 で良い基盤（直進チャレンジで前進 555cm）なので、必要なのは小さな操舵補正だけ。
+    // 幅を絞ると方策が基盤から大きく逸脱できず、学習の「床」が基盤付近に保たれて崩壊（後退）しにくい。
+    maxJointDelta: 0.2,
     previewOffsets: [0.2, 0.4, 0.7, 1.0],
-    forwardReward: 30,
-    lateralPenalty: 2,
+    forwardReward: 20,
+    lateralPenalty: 1.0, // per-step 横速度の軽い減衰（うねり自体は許す）。直進補正は centerlinePenalty が担う
+    // |y−y0| を罰して斜行を中心へ戻させる。ただし上限付き（centerlineCap で飽和）＝学習初期に大ドリフトしても
+    // 罰が暴走せず（無制限だと基盤の -4.5m で penalty が前進報酬を桁違いに上回り PPO が崩壊する）、前進報酬が支配を保つ。
+    centerlinePenalty: 0.1,
+    centerlineCap: 0.6, // この距離[m]で罰を頭打ちに（最大 centerlinePenalty·centerlineCap ≈ 前進報酬と同程度）
     energyPenalty: 0.002,
     satPenalty: 0.05,
     aliveBonus: 0.01,
@@ -90,8 +102,12 @@ export class SnakeEnv implements RLEnv {
   private readonly groundGate: number;
   private readonly layout: SnakeBodyLayout[];
 
-  // MuJoCo モデルは一度だけコンパイル、data はエピソード毎に作り直す（reset の安定化）。
-  private readonly model: ReturnType<MujocoModule['MjModel']['from_xml_string']>;
+  // MuJoCo モデルは地形バンクの各地形ごとに1回だけコンパイルして保持、data はエピソード毎に作り直す。
+  // ドメインランダム化では reset 毎に地形（=モデル）をランダムに切り替える。バンク未指定なら要素1個。
+  private readonly terrains: SnakeTerrainBox[][];
+  private readonly models: Array<ReturnType<MujocoModule['MjModel']['from_xml_string']>>;
+  private model: ReturnType<MujocoModule['MjModel']['from_xml_string']>;
+  private activeTerrain: SnakeTerrainBox[];
   private data: InstanceType<MujocoModule['MjData']>;
 
   private readonly residual: Float64Array;
@@ -128,12 +144,20 @@ export class SnakeEnv implements RLEnv {
       half: [this.sim.segLen / 2, this.halfW, this.halfW] as [number, number, number],
     }));
 
-    this.model = mj.MjModel.from_xml_string(buildMjcf(this.sim, this.axes, this.physicsDt));
+    // 地形バンク（未指定なら sim.terrain 単体）。各地形のモデルを事前コンパイル。
+    this.terrains =
+      cfg.terrainBank && cfg.terrainBank.length > 0 ? cfg.terrainBank : [this.sim.terrain];
+    this.models = this.terrains.map((terrain) =>
+      mj.MjModel.from_xml_string(buildMjcf({ ...this.sim, terrain }, this.axes, this.physicsDt)),
+    );
+    this.model = this.models[0];
+    this.activeTerrain = this.terrains[0];
     this.data = new mj.MjData(this.model);
 
     this.actDim = this.nJoints; // 各関節の歩容残差
-    // 観測: 位相(2)+COM速度(2)+頭クリアランス(1)+頭ピッチ(1)+前方地形プレビュー(K)+関節角(nJoints)
-    this.obsDim = 6 + cfg.previewOffsets.length + this.nJoints;
+    // 観測: 位相(2)+COM速度(2)+頭クリアランス(1)+頭ピッチ(1)+横オフセット(1)+体軸ヘディング(2)
+    //       +前方地形プレビュー(K)+関節角(nJoints)。横オフセット＋ヘディングが直進補正の閉ループ信号。
+    this.obsDim = 9 + cfg.previewOffsets.length + this.nJoints;
     this.obs = new Float32Array(this.obsDim);
     this.residual = new Float64Array(this.actDim);
     this.prevPos = Array.from({ length: this.n }, () => [0, 0, 0] as [number, number, number]);
@@ -172,7 +196,7 @@ export class SnakeEnv implements RLEnv {
   /** 歩行面（足場/壁）の地形上面 [m]。天板など頭上の張り出し（底面が高い箱）は除外する。 */
   private groundTopAt(x: number, y: number): number {
     let top = 0;
-    for (const b of this.sim.terrain) {
+    for (const b of this.activeTerrain) {
       if (b.cz - b.halfZ > 0.12) continue; // 頭上の張り出し（テーブル天板）は歩行面でない
       if (Math.abs(x - b.cx) <= b.halfX && Math.abs(y - b.cy) <= b.halfY) {
         top = Math.max(top, b.cz + b.halfZ);
@@ -185,7 +209,19 @@ export class SnakeEnv implements RLEnv {
     return this.com()[0];
   }
 
-  reset(): Float32Array {
+  /**
+   * エピソードを初期化。地形バンクが複数なら毎回ランダムに地形（=事前コンパイル済みモデル）を選ぶ
+   *（ドメインランダム化）。`forceTerrainIdx` を渡せば特定地形に固定（決定論評価・録画用）。
+   */
+  reset(forceTerrainIdx?: number): Float32Array {
+    const idx =
+      forceTerrainIdx !== undefined
+        ? forceTerrainIdx
+        : this.models.length > 1
+          ? Math.floor(Math.random() * this.models.length)
+          : 0;
+    this.model = this.models[idx];
+    this.activeTerrain = this.terrains[idx];
     this.data.delete();
     this.data = new this.mj.MjData(this.model);
     this.mj.mj_forward(this.model, this.data);
@@ -227,7 +263,12 @@ export class SnakeEnv implements RLEnv {
       layout: this.layout,
       frames: this.frames,
       summary: {
-        config: { ...this.sim, duration: this.simSubstep * this.physicsDt },
+        // 録画再生用の地形は「このエピソードで実際に使った地形」（バンクからランダム選択された地形）。
+        config: {
+          ...this.sim,
+          terrain: this.activeTerrain,
+          duration: this.simSubstep * this.physicsDt,
+        },
         travelM,
         netDispM: [dx, dy],
         headingDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
@@ -278,7 +319,8 @@ export class SnakeEnv implements RLEnv {
           this.prevPos[i][0] = px;
           this.prevPos[i][1] = py;
           this.prevPos[i][2] = pz;
-          const top = this.sim.terrain.length > 0 ? snakeTerrainTopAt(this.sim.terrain, px, py) : 0;
+          const top =
+            this.activeTerrain.length > 0 ? snakeTerrainTopAt(this.activeTerrain, px, py) : 0;
           if (pz - top > this.groundGate) {
             drive.push([0, 0]);
             continue;
@@ -343,10 +385,13 @@ export class SnakeEnv implements RLEnv {
     energy /= this.actDim;
     const satFrac = satSamples > 0 ? satCount / satSamples : 0;
 
+    const offset = cy - this.startComY; // センターライン（開始 y）からの横ずれ
+    const offMag = Math.min(Math.abs(offset), this.cfg.centerlineCap); // 上限付き（暴走防止）
     const blewUp = !Number.isFinite(cx) || !Number.isFinite(cy) || Math.abs(cx) > 50;
     let reward =
       this.cfg.forwardReward * dx -
       this.cfg.lateralPenalty * Math.abs(dy) -
+      this.cfg.centerlinePenalty * offMag -
       this.cfg.energyPenalty * energy -
       this.cfg.satPenalty * satFrac +
       this.cfg.aliveBonus;
@@ -411,9 +456,19 @@ export class SnakeEnv implements RLEnv {
     o[3] = (cy - this.prevComY) / 0.02;
     o[4] = (headZ - this.groundTopAt(headX, headY)) / 0.05; // 頭クリアランス
     o[5] = headFwd[2]; // 頭ピッチ（+1=真上, -1=真下）
+    // 直進補正の閉ループ信号: センターライン（開始 y）からの横オフセットと、体軸ヘディング。
+    o[6] = clamp((cy - this.startComY) / 0.5, -3, 3); // 横オフセット（どれだけ斜行したか）
+    const tailBid = this.bodyId(0);
+    let axX = headX - xpos[tailBid * 3];
+    let axY = headY - xpos[tailBid * 3 + 1];
+    const axLen = Math.hypot(axX, axY) || 1;
+    axX /= axLen;
+    axY /= axLen;
+    o[7] = axX; // 体軸ヘディング x（真っ直ぐ +x なら ≈±1）
+    o[8] = axY; // 体軸ヘディング y（veer 量＝符号付きで操舵方向が分かる）
     // 前方地形プレビュー: COM 前方各オフセットの歩行面高さ − COM 直下の歩行面高さ。
     const baseTop = this.groundTopAt(cx, cy);
-    const pBase = 6;
+    const pBase = 9;
     for (let i = 0; i < this.cfg.previewOffsets.length; i++) {
       o[pBase + i] = (this.groundTopAt(cx + this.cfg.previewOffsets[i], cy) - baseTop) / 0.06;
     }
@@ -428,6 +483,6 @@ export class SnakeEnv implements RLEnv {
 
   dispose(): void {
     this.data.delete();
-    this.model.delete();
+    for (const m of this.models) m.delete(); // バンクの全モデルを解放
   }
 }

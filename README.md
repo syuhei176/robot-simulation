@@ -1,61 +1,55 @@
-# ロボット シミュレーター — モーター選定
+# MuJoCo 3D 蛇ロボット シミュレーター
 
-小型ロボット（蛇型 / 四足）の **形状を比較し、必要なモーター（サーボ）を具体的に逆算・選定する**
-ためのシミュレーター。ハードを作る前に「この形・この重さなら、どのサーボなら動くか／いくらか」を
-数値で出すことを目的にする。Three.js + TypeScript、物理は [Rapier](https://rapier.rs/) と自前の静力学、
-すべてブラウザ／Node で動く（GPU 不要）。
-
-実サーボのカタログ（SG90 / MG90S / SCS0009 / MG996R / STS3215 ＋ Dynamixel 系）を単一の真実として持ち、
-シミュレーション結果から **「このサーボで足りる / 足りない」「最安はどれ」** を直接返す。
+MuJoCo の 3D 蛇（snake3d）を題材に、**手設計の基盤歩容（開ループ）と、コースに汎用な強化学習方策（残差RL）を
+同じコース上で比較する**シミュレーター。だんだん難しくなる地形（小障害物 → 階段 → 踊り場/壁）を、開ループの
+基盤歩容では地形に進行方向を蹴られて斜行してしまうのに対し、閉ループの RL 方策は横ドリフトを検知して
+進行方向へ操舵し直し、**どのコースでも基盤歩容の前進量を上回る**ことを示す。あわせて、この蛇を実際に作るときの
+**サーボ選定・材料表（BOM）** も数値で出す。Three.js + TypeScript、物理は MuJoCo(WASM)。学習は Node オフライン
+（TensorFlow.js）で、ブラウザは記録済みリプレイを再生するだけ（TF.js をバンドルしない）。
 
 **🔗 ライブデモ: https://syuhei176.github.io/robot-simulation/**（`main` への push で GitHub Pages へ自動デプロイ）
 
 ## できること
 
-- **静的モーター逆算** — 形状（リンク数・長さ・質量・段の寸法）→ 保持トルク → 安全率込みで満たす最小/最安サーボ。
-  機構（蛇 vs 四足）の比較表も出す。`pnpm motor-sizing`
-- **動的接触シミュレーション（階段）** — Rapier で剛体リンク＋トルク上限＋摩擦を解き、
-  追従不能・滑り・落下・縁越えを実際に起こす。`pnpm stair-dynamics`
-- **四足 3D 動的歩行** — IK クロール歩容を「忠実トルク（PD を ±ストールで clamp）」で駆動。
-  cap→前進距離が単調・総質量に応答するので、**重さ × サーボ** で歩ける/失速するを判定できる。`pnpm quadruped`
-- **機体スケール連動（小型四足 × 安サーボ）** — 総質量スライダーが**機体スケール** s も兼ねる（密度一定の相似縮小:
-  mass ∝ s³, 脚長・歩容 ∝ s, PD ゲイン ∝ s⁵, 横安定化 ∝ s⁴, substeps ∝ 1/s）。これで **150g 級の小型四足が
-  SCS0009（実売 ~700円）のトルク上限内**で平地を歩く（要求 ~0.09 N·m ≤ cap 0.226・飽和なし）。大型機体は
-  STS3215、小型機体は SCS0009、と同じダッシュボードで端から端まで評価できる。s=1（1.2kg）で従来機体に一致。
-- **統合ダッシュボード** — `index.html` で **機構（蛇/四足）× コース（階段/低い階段/小障害物/合成/平地）× モーター × 歩容パラメータ** を
-  1画面で切り替えて挙動を再生。新機構は `src/mech` に `Mechanism` を1つ足すだけで現れる。
-- **共通Map（合成コース）+ 四足の地形適応歩容** — 1つのコースに「平地→障害物→階段」を直列に並べた
-  **合成コース** を `src/sim3d/course.ts` に追加。四足は足先を `terrainTopAt` に沿わせる**地形適応クロール歩容**で
-  障害物（2.5cm）と低い階段（3cm×3）を越えて端まで走破する。蛇は輪郭追従の診断用（長い合成地形では座屈する）。
-- **オフライン歩容最適化（CMA-ES）** — 歩容パラメータを Mac/Node のヘッドレス Rapier 上で
-  CMA-ES 最適化（目的＝前進量−物理破綻ペナルティ。機構が宣言する `replay.score()` で機構非依存）。
-  結果（調整済みパラメータ＋改善履歴）を `public/tuned/*.json` に出力し、ダッシュボードで
-  **scripted ↔ tuned を切り替えて再生・改善カーブを表示**する。`pnpm optimize-gait`
-- **3D 四足の強化学習（残差RL・地形適応）** — `runQuadrupedGait` を 1 制御ステップずつ進められる RL 環境
-  `QuadEnv`（`src/env/QuadEnv.ts`）に展開。方策が 8 関節（hip×4 + knee×4）を制御する。既定は **残差RL**＝
-  IK クロール歩容に方策の補正を上乗せ（`--base-tuned auto` で CMA-ES の速い tuned 歩容を土台にできる）。
-  土台が action=0 でも前進するので決定論方策も最初から歩き、end-to-end が嵌る「ノイズ依存の縮退（平均は静止）」を
-  回避できる。観測＝位相クロック＋胴 pitch/速度＋関節角＋**前方地形プレビュー**（合成コースで段差を先読み）、
-  報酬＝前進−傾き−行動エネルギー−トルク飽和。学習は Mac オフライン（`Policy`+`PPO`/TF.js）。学習した方策の
-  決定論ロールアウトを **frames 記録**して `public/policies/*.replay.json` に保存し、**ダッシュボードの「RL」ボタンで
-  TF.js 無しで再生**できる。`pnpm train-quad --base-tuned auto`（end-to-end 比較は `--base-gait false`）
-  - 実績: 平地 小型四足×SCS0009 = 決定論 54cm/200step、合成コース 大型四足×STS3215（地形適応）= 障害物＋
-    階段3段を登り**踊り場まで全走破 241cm/1800step**（転倒なし）。ダッシュボードの RL ボタンで再生できる。
-- **多足（クモ/ウニ）機構 — 安サーボで合成コース走破** — 「**SCS0009（~700円）+ 軽量の足で合成コースを
-  走破できる機構は何か**」を形態探索（`pnpm morph-sweep`）。N脚に一般化した動的歩行（`makeLegs(rows)`）で
-  脚数×脚長を振り、各形態を **SCS0009 cap=0.226 と 実質無限 cap で比較**して「安サーボが真に足りるか」を判定した。
-  結論: **トルクは軽量機体では律速でない**（150g 機体で τ余裕 2〜4倍・飽和ゼロ）。機体を縮小すると逆に
-  絶対 2.5cm の障害物が相対的に巨大化して四足は 18cm で停滞する。走破の鍵は **軽い胴(≲300g)＋障害物より
-  長い脚(12〜15cm)＋多脚 tripod(6〜8本)** ＝「**胴の小さいクモ/ウニ(daddy-long-legs)**」型。
-  旗艦 = 六足 tripod・脚15cm・215〜257g・SCS0009 で **合成コースを踊り場まで全走破(~284cm)**（飽和ゼロ・
-  ピーク要求は整定の一過性）。「安いモーターでどこまで」の答えは、軽量多足では**最安の SG90(¥300) でも走破**
-  （トルクは律速にならない）＝ SCS0009 を推す理由はトルクでなく **位置帰還（12関節の協調制御に必須）**。
-  ダッシュボードに `機構: 多足（クモ/ウニ）` を追加（脚数/脚長/歩容スライダー）。詳細は
-  [`docs/snake-stair-sizing.md`](docs/snake-stair-sizing.md) §6.13。
+- **MuJoCo 3D 蛇（関節構成 × 歩容のキャンバス）** — `src/sim3d/snake3d-dynamics.ts`。関節を軸パターン
+  （all-yaw=横うねり / alt-yaw-pitch=yaw/pitch交互 / all-pitch=尺取り）で宣言し、歩容はパラメタ化した
+  セルペノイド波（yaw/pitch の振幅・位相・周期・波長）で与える。前進は車輪相当の異方抵抗（接地リンクのみ）で生む。
+  地形は実接触の剛体箱（`SnakeTerrainBox`）として置き、蛇は体を押し付けて段を登る。
+
+- **コースに汎用な強化学習で「基盤歩容」を実際に上回る（残差RL・直進補正）** — `runSnake3D` を 1 制御ステップ
+  ずつ進められる RL 環境 `SnakeEnv`（`src/env/SnakeEnv.ts`）に展開し、方策が n−1 関節の歩容残差を制御する **残差RL**
+  （目標角 = 基盤登坂歩容 + ±maxJointDelta·tanh(action)。action=0 でも障害物＋階段を越える）。
+  - **基盤の弱点**: 開ループの基盤歩容は地形に進行方向を蹴られ、その後も盲目的に ~−40° へ斜行して前進を浪費する
+    （平地では真っ直ぐ進めるのに、コースでは大きく veer する）。閉ループの RL は **横オフセット＋体軸ヘディング観測**で
+    斜行を検知し、+x へ操舵し直して浪費していた横移動を前進へ変換する。
+  - **コース汎用**: 毎エピソード地形をランダム化（平地／障害物／各種階段／壁つき。`makeCourseBank`）する
+    **ドメインランダム化**で単一方策を学習。平地を必ず混ぜることで「ドリフトしていない時は操舵しない」を学ばせ、
+    特定コースへの過学習（常時操舵バイアス）を防ぐ。ベスト方策は **コース横断の最小改善率**で選び、どのコースでも
+    基盤を下回らないようにする。
+  - **PPO 安定化**: 残差RLは報酬の振れ幅が大きく崩れやすいので、**勾配ノルムクリップ＋KL 早期停止＋探索 std
+    アニーリング**（決定論 mean に性能を移す）＋上限付き中心線ペナルティ＋残差幅の抑制で安定収束させた。
+  - **実績（MG996R・1800step・決定論・完走。単一の汎用方策が全コースで基盤超え）**:
+
+    | コース                           | 基盤歩容 | RL 方策 | 上乗せ                              |
+    | -------------------------------- | -------- | ------- | ----------------------------------- |
+    | 平地                             | 943cm    | 948cm   | +1%                                 |
+    | 進行性（障害物→階段→テーブル壁） | 348cm    | 370cm   | +7%                                 |
+    | 直進チャレンジ（壁なし長距離）   | 555cm    | 839cm   | **+51%**（横ドリフト −447cm→−17cm） |
+
+    `pnpm train-snake --course general --episode-steps 1800` で学習、`pnpm verify-policy --stem snake3d-general-mg996r`
+    で各コースの再現（基盤超え）を検証できる。
+
+- **統合ダッシュボード（コース選択 × 基盤 vs RL）** — `index.html` + `src/dashboard.ts`。コース（平地／進行性／
+  直進チャレンジ）・モーターを選び、**基盤歩容（scripted・ライブ実行）** と **RL方策（記録リプレイ再生）** を切り替えて
+  比較する。RL は「基盤 X cm → RL Y cm（+N%）」を表示。コースを切り替えても同じ汎用方策が各コースの録画を再生する。
+
+- **材料表（BOM＝買い物リスト）** — `materials.html` + `src/sim3d/bom.ts`。蛇（16リンク=15関節・0.6kg）を実際に
+  作るためのサーボ＋制御部品＋フレーム/電源の概算を、サーボカタログ（`servos.ts`）と静的保持トルク（`chain.ts`）から
+  導出。必要トルク 0.21 N·m を満たす中で **推奨=SCS0009（位置帰還つきで多関節協調制御に必須＝推奨理由はトルクでなく帰還）**。
 
 ## 動かす
 
-Node 24 が必要（相対 import を `.ts` 拡張子で解決するため）。
+Node 24+ が必要（相対 import を `.ts` 拡張子で解決するため）。
 
 ```bash
 nvm use 24
@@ -63,72 +57,41 @@ pnpm install
 pnpm dev          # http://localhost:5173
 ```
 
-- `http://localhost:5173/` … 統合ダッシュボード（機構 × コース × モーター × 歩容パラメータ）
-  - 蛇＝コース physical attempt（赤: 落下/干渉、オレンジ: トルク超過、黄: 滑り、水色: 支持接触）。コース選択で階段/低い階段/小障害物/合成/平地を切替。
-  - 四足＝3D 動的歩行（モーター選択で τ上限を自動設定、歩容スライダーで period/stride/lift 等を調整）。
-    **地形適応歩容**でコースを選べる（合成コースは障害物＋低い階段を走破。高い段は転倒する）。
-    **総質量スライダーが機体スケールを兼ねる**: 既定は 150g の小型四足 × SCS0009 で平地を歩くデモ。
-    質量を上げると機体ごと大きくなり要求トルクが増える（合成コース走破は STS3215 + 大型機体 + tuned）。
-  - **scripted / tuned / RL 切替** … `pnpm optimize-gait` の結果（`public/tuned/`）がある 機構×コース×モーター で
-    **tuned** が、`pnpm train-quad` の RL 方策記録（`public/policies/`）がある組合せで **RL** が有効になる。
-    tuned は調整済み歩容＋改善カーブ、RL は学習方策の記録リプレイ（frames）を再生する。
+- `http://localhost:5173/` … 統合ダッシュボード。コース × モーター × 歩容パラメータを切替。
+  - **基盤歩容 / RL方策** ボタンで切替。基盤歩容はスライダーの歩容をライブ実行、RL は学習済み汎用方策の記録リプレイ。
+  - 既定は「直進チャレンジ × MG996R」。基盤歩容が斜行 → RL方策ボタンで +x へ操舵し直す様子（基盤 555cm → RL 839cm）が見える。
+- `http://localhost:5173/materials.html` … 材料表（サーボ選択で合計が即時更新）。
 
-## コマンド（Node 24 で実行）
+## コマンド（Node 24+ で実行）
 
 ```bash
-pnpm motor-sizing   # 形状→モーター逆算＋機構×モーター比較＋軽量化スイープ
-pnpm quadruped      # 四足 3D 動的歩行レポート＋静的サーボ選定スイープ
-pnpm morph-sweep    # 形態探索: SCS0009+軽量脚で合成コースを走破できる機構（脚数×脚長×cap感度）
-pnpm stair-dynamics # 階段の Rapier 動的プローブ＋完全 physical attempt 診断
-pnpm optimize-gait  # 歩容を CMA-ES でオフライン最適化 → public/tuned/*.json（--mech/--course/--motor/--gens/--seed）
-pnpm train-quad --base-tuned auto  # 3D 四足を残差RL(PPO)で学習 → public/policies/*.json（--iters/--rollout/--base-gait）
+pnpm train-snake --course general --episode-steps 1800   # 蛇の汎用RL方策を学習（ドメインランダム化）→ public/policies/
+pnpm train-snake --course challenge --episode-steps 1800 # 単一コースで学習（比較用。flat / progression / challenge）
+pnpm verify-policy --stem snake3d-general-mg996r         # 保存済み方策を再ロードし各コースで「基盤超え」の再現を検証
+pnpm dev / pnpm build / pnpm preview                     # ダッシュボード（開発 / 本番ビルド / プレビュー）
+pnpm quality-check                                       # lint + format:check + type-check
 ```
 
-`optimize-gait` の主なオプション（既定: `--mech quad --course stairs --motor sts3215 --gens 20 --seed 1`）:
-
-```bash
-pnpm optimize-gait --mech quad  --course flat --motor scs0009   # 小型四足(既定150g)の歩容を平地で最適化
-pnpm optimize-gait --mech quad  --motor sts3215 --mass 1.2      # 大型四足(--massで機体スケール上書き)を階段で最適化
-pnpm optimize-gait --mech snake --course lowStairs              # 蛇の歩容（referenceSpeed/clearance）を低い階段で最適化
-pnpm sanity         # 平面物理: CPG 駆動で前進・数値安定を確認
-pnpm rl-smoke       # 平面 RL: 数イテレーションで学習が伸びる/NaN なしを確認
-pnpm quality-check  # lint + format:check + type-check
-```
+`train-snake` の主なオプション: `--iters`（イテレーション数）`--rollout`（PPO ロールアウト長）`--motor`（サーボ id）
+`--episode-steps`（1エピソードの制御ステップ）`--lr` `--ent-coef` `--eval-every`。
 
 ## 構成
 
-選定の中核（`src/sim3d/`）:
+- [`src/sim3d/snake3d-dynamics.ts`](src/sim3d/snake3d-dynamics.ts) … MuJoCo 3D 蛇の物理・歩容・地形（コース生成・ドメインランダム化）。
+- [`src/sim3d/mujoco-engine.ts`](src/sim3d/mujoco-engine.ts) … MuJoCo(WASM) のロード。
+- [`src/env/SnakeEnv.ts`](src/env/SnakeEnv.ts) … 残差RL 環境（`RLEnv` 契約）。観測=位相＋COM速度＋頭クリアランス/ピッチ＋横オフセット＋体軸ヘディング＋前方地形プレビュー＋関節角。地形バンクで reset 毎にコースをランダム化。
+- [`src/rl/`](src/rl/) … 方策 [`Policy.ts`](src/rl/Policy.ts)（ガウス方策＋価値関数 MLP）＋ [`PPO.ts`](src/rl/PPO.ts)（勾配クリップ・KL 早期停止）＋契約 [`RLEnv.ts`](src/rl/RLEnv.ts)。TensorFlow.js（Node オフライン）。
+- [`src/mech/`](src/mech/) … ダッシュボード用の機構抽象 [`Mechanism.ts`](src/mech/Mechanism.ts) ＋ [`snake3d.ts`](src/mech/snake3d.ts)（snake3d 実装・基盤歩容の scripted 実行＋RL リプレイ再生）＋ [`registry.ts`](src/mech/registry.ts)。
+- [`src/render/StairDynamicsView.ts`](src/render/StairDynamicsView.ts) … Three.js ビュー（蛇カプセル・地形箱・軌跡・距離グリッド、頭追従カメラ）。
+- [`src/sim3d/course.ts`](src/sim3d/course.ts) … ダッシュボードのコースカタログ（平地/進行性/直進チャレンジ）。
+- [`src/sim3d/{servos,chain,bom}.ts`](src/sim3d/) ＋ [`src/materials.ts`](src/materials.ts) … サーボカタログ・静力学・材料表。
+- [`scripts/train-snake.ts`](scripts/train-snake.ts) … 蛇の残差RL（PPO）をオフライン学習し、汎用方策＋各コースの記録リプレイを `public/policies/` に保存。
+- [`scripts/verify-policy.ts`](scripts/verify-policy.ts) … 保存済み方策を再ロードし各コースで決定論評価して基盤と比較。
 
-- [`servos.ts`](src/sim3d/servos.ts) … サーボカタログ（単一の真実）。ストール・質量・価格・FB有無・ギア・IF。
-- [`chain.ts`](src/sim3d/chain.ts) … 矢状面の多リンク連鎖の静力学（円弧 IK・重力モーメント・片持ち）。
-- [`quadruped-static.ts`](src/sim3d/quadruped-static.ts) … 四足の静的保持トルク（立脚/踏み出し/段差リーチ）。
-- [`quadruped-dynamics.ts`](src/sim3d/quadruped-dynamics.ts) … 四足 3D 動的歩行（IK クロール＋忠実トルク＋横安定化）。
-- [`stair-dynamics.ts`](src/sim3d/stair-dynamics.ts) … 階段の Rapier 動的接触シミュレーション。
-- [`stair-kinematic-replay.ts`](src/sim3d/stair-kinematic-replay.ts) / [`stair-feasibility.ts`](src/sim3d/stair-feasibility.ts) / [`stair-physical-attempt.ts`](src/sim3d/stair-physical-attempt.ts)
-  … 完全階段登りの目標軌道・実現可能性診断・失敗も動く physical attempt。
-- [`StairDynamicsView.ts`](src/render/StairDynamicsView.ts) … 共有レンダラ（蛇の連鎖・四足・コースを描く）。
-- [`course.ts`](src/sim3d/course.ts) … コース（地形）の単一の真実（階段/低い階段/小障害物/平地）。
+## 設計メモ
 
-統合ダッシュボードと歩容最適化:
+検討の経緯・数値・前提は [`docs/snake-stair-sizing.md`](docs/snake-stair-sizing.md)（過去の四足/多足機構の探索を含む歴史的記録）。
 
-- [`src/mech/`](src/mech/) … 機構抽象。`Mechanism`（蛇/四足/多足の `run` と `score`）＋ `registry`。新機構はここに1つ足すだけ。
-  多足（クモ/ウニ）は [`multiped.ts`](src/mech/multiped.ts)（N脚一般化した `runQuadrupedGait` を流用）。
-- [`dashboard.ts`](src/dashboard.ts) … 機構 × コース × モーター × 歩容 を1画面で切替＋ scripted/tuned 再生（`index.html`）。
-- [`scripts/optimize-gait.ts`](scripts/optimize-gait.ts) … CMA-ES（Jacobi 固有値分解つき・seed 再現可）で歩容をオフライン最適化。
-- [`scripts/train-quad.ts`](scripts/train-quad.ts) … 3D 四足の end-to-end RL（PPO）をオフライン学習し方策を `public/policies/` に保存。
-
-歩容の学習（`src/sim`, `src/env`, `src/rl`）— すべて Node でオフライン実行（蛇=`pnpm rl-smoke` / 四足=`pnpm train-quad`）:
-
-- 物理 [`SnakePhysics.ts`](src/sim/SnakePhysics.ts) … 抵抗力ベースの準静的モデル（Hirose 標準モデル）。
-  異方性摩擦の力・トルク釣り合いを 3×3 線形系で解き、前進が振幅/周波数に滑らかに応答する。
-- 環境 [`MicrobotEnv.ts`](src/env/MicrobotEnv.ts)（平面蛇・行動→CPG パラメータ）/ [`QuadEnv.ts`](src/env/QuadEnv.ts)
-  （3D 四足・行動→8 関節目標角, `runQuadrupedGait` をステップ化）。どちらも共通契約 [`RLEnv.ts`](src/rl/RLEnv.ts)。
-- 方策/学習 [`Policy.ts`](src/rl/Policy.ts) / [`PPO.ts`](src/rl/PPO.ts) … TensorFlow.js の小さな MLP＋自前 PPO（Node オフライン）。
-
-## 設計メモ・ハンドオフ
-
-検討の経緯・数値・前提・宿題は [`docs/snake-stair-sizing.md`](docs/snake-stair-sizing.md) に集約している。
-
-- 物理エンジン: **Rapier**（`@dimforge/rapier3d-compat`）。接触で精度不足なら MuJoCo を検討。
-- 静的サイズ逆算と動的検証は分離する（両方そろって初めてハード判断できる）。
-- 既存の平面 RL（`src/sim`）と 3D 系（`src/sim3d`）は隔離している。
+- 物理エンジン: **MuJoCo**（`@mujoco/mujoco` WASM）。蛇は実接触で段に体を押し付けて登る。
+- 学習は Node オフライン（TF.js）で実行し、ブラウザは記録済みリプレイ（frames）を再生するだけ＝TF.js をバンドルしない。
+- 環境は決定論的（同じ重み・地形なら同結果）。保存方策は `verify-policy` で再現を確認できる。

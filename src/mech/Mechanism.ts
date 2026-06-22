@@ -6,7 +6,7 @@
  * 新機構は {@link Mechanism} を1つ実装して registry に登録するだけで追加できる
  * （HTML やダッシュボード本体の変更は不要）。
  */
-import type { CourseSpec } from '../sim3d/course.ts';
+import type { SnakeTerrainBox } from '../sim3d/snake3d-dynamics.ts';
 import type { StairDynamicsView } from '../render/StairDynamicsView.ts';
 
 /** ダッシュボードのスライダー1本分の定義（歩容・物理つまみ）。 */
@@ -49,7 +49,7 @@ export interface StatRow {
 
 /** run() に渡す実行コンテキスト。 */
 export interface MechRunCtx {
-  course: CourseSpec;
+  course: SnakeTerrainBox[]; // 選択コースの地形（平地は空配列）
   /** モーター τ 上限 [N·m]（サーボ選択が既定値を入れ、スライダーで微調整可）。 */
   torqueCapNm: number;
   /** モーター表示名（統計表示用）。 */
@@ -80,11 +80,6 @@ export interface Mechanism {
   subtitle: string;
   /** コース（地形）を反映できるか。false の機構ではコース選択を無効化する。 */
   supportsCourse: boolean;
-  /**
-   * tuned/RL 成果物を照合するコース名（manifest の course 列）の上書き。コース選択 UI とは独立に
-   * 学習を別コースで行う機構（蛇3D は RL を進行性コースで学習）に使う。未指定なら従来どおり。
-   */
-  rlCourse?: string;
   /** 歩容＋物理のライブ調整つまみ。ダッシュボードがこの配列からスライダーを動的生成する。 */
   params: MechParam[];
   run(ctx: MechRunCtx): Promise<MechReplay>;

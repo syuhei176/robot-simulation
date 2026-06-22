@@ -3,28 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Robot simulator for concrete motor (servo) selection: compare snake/quadruped morphologies and size actuators via static + dynamic (Rapier) simulation",
+  "description": "MuJoCo 3D snake robot simulator: dashboard to compare a base climbing gait vs a course-general residual-RL policy across terrains, plus servo/BOM sizing",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "sanity": "node scripts/sanity.ts",
-    "rl-smoke": "node scripts/rl-smoke.ts",
-    "motor-sizing": "node scripts/motor-sizing.ts",
-    "stair-dynamics": "node scripts/stair-dynamics.ts",
-    "env-check": "node scripts/env-check.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "type-check": "tsc --noEmit",
     "quality-check": "pnpm lint && pnpm format:check && pnpm type-check",
-    "quadruped": "node scripts/quadruped.ts",
-    "morph-sweep": "node scripts/morph-sweep.ts",
-    "optimize-gait": "node scripts/optimize-gait.ts",
-    "train-quad": "node scripts/train-quad.ts"
+    "train-snake": "node scripts/train-snake.ts",
+    "verify-policy": "node scripts/verify-policy.ts"
   },
   "dependencies": {
-    "@dimforge/rapier3d-compat": "^0.19.3",
     "@mujoco/mujoco": "^3.9.0",
     "@tensorflow/tfjs": "^4.22.0",
     "three": "^0.169.0"

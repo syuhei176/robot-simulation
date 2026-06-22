@@ -146,14 +146,6 @@
         min-height: 14px;
         font-variant-numeric: tabular-nums;
       }
-      #improve-curve {
-        width: 100%;
-        height: 56px;
-        display: block;
-        background: rgba(53, 200, 255, 0.04);
-        border: 1px solid rgba(53, 200, 255, 0.15);
-        border-radius: 6px;
-      }
     </style>
   </head>
   <body>
@@ -162,6 +154,9 @@
       <h1 id="title">MICROBOTS</h1>
       <div class="sub">MuJoCo 蛇 — 関節構成 × 歩容 × モーター選定</div>
       <div class="sub" id="mech-subtitle" style="margin-top: -8px"></div>
+      <div class="sub" style="margin-top: -6px">
+        <a id="link-materials" href="./materials.html">🛒 材料表（買い物リスト）→</a>
+      </div>
       <div class="row">
         <!-- options populated from UI_MECHANISMS (snake-only) in dashboard.ts; hidden when single -->
         <select id="sel-mech"></select>
@@ -186,22 +181,16 @@
       <!-- sliders injected from mechanism.params in dashboard.ts -->
       <div id="param-sliders"></div>
       <div id="learned-gait">
-        <div class="section-title">学習済み歩容（CMA-ES / RL）</div>
+        <div class="section-title">歩容: 基盤(scripted) vs 学習方策(RL)</div>
         <div class="row">
-          <button id="btn-scripted" class="active">scripted</button>
-          <button
-            id="btn-tuned"
-            disabled
-            title="この 機構×コース×モーター の最適化結果はありません"
-          >
-            tuned
+          <button id="btn-scripted" class="active" title="開ループの基盤登坂歩容（残差0）">
+            基盤歩容
           </button>
-          <button id="btn-rl" disabled title="この 機構×コース×モーター の RL 方策はありません">
-            RL
+          <button id="btn-rl" disabled title="この コース×モーター の RL 方策はありません">
+            RL方策
           </button>
         </div>
         <div class="tuned-info" id="tuned-info"></div>
-        <canvas id="improve-curve" width="304" height="56"></canvas>
       </div>
       <!-- rows injected from liveStats()/resultStats() in dashboard.ts -->
       <div class="stats" id="stats"></div>

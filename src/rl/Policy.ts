@@ -24,7 +24,7 @@ export class Policy {
   private readonly valueNet: tf.Sequential;
   private readonly logStd: tf.Variable;
 
-  constructor(obsDim: number, actDim: number, hidden = 64) {
+  constructor(obsDim: number, actDim: number, hidden = 64, logStdInit = -0.5) {
     this.obsDim = obsDim;
     this.actDim = actDim;
 
@@ -38,7 +38,7 @@ export class Policy {
 
     this.policyNet = mlp(actDim, 'linear');
     this.valueNet = mlp(1, 'linear');
-    this.logStd = tf.variable(tf.fill([actDim], -0.5), true, 'logStd');
+    this.logStd = tf.variable(tf.fill([actDim], logStdInit), true, 'logStd');
   }
 
   /** 1 状態から行動をサンプル（学習時のロールアウト収集用）。 */
@@ -133,6 +133,14 @@ export class Policy {
   /** 現在の平均 std（探索量の目安、ログ表示用）。 */
   meanStd(): number {
     return tf.tidy(() => tf.exp(this.logStd).mean().dataSync()[0]);
+  }
+
+  /**
+   * 探索 std（の対数）を外から設定する。学習を通して std をアニーリング（縮小）し、
+   * 決定論的な平均行動に性能を担わせる（mean が good 領域へ寄り、det 評価が確率的性能に追従する）。
+   */
+  setLogStd(value: number): void {
+    this.logStd.assign(tf.fill([this.actDim], value));
   }
 
   dispose(): void {

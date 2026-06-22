@@ -33,7 +33,7 @@ class Snake3DMechReplay implements MechReplay {
   }
 
   bindView(view: StairDynamicsView): void {
-    view.setMechanism('snake3d');
+    view.showSnake3D();
     view.buildSnake3D(this.replay.layout);
     view.setSnake3DTerrain(this.replay.summary.config.terrain); // 進行性コースの地形（平地なら空）
     // 頭（末尾リンク）の全軌跡を渡して trail / 目盛り / 開始マーカーを描く（移動が一目で分かる）。
@@ -117,18 +117,17 @@ export function recordedSnake3DReplay(
 export const snake3dMechanism: Mechanism = {
   id: 'snake3d',
   name: '機構: 蛇3D (MuJoCo)',
-  subtitle: 'MuJoCo 汎用蛇: 関節構成(JointSpec)×歩容を分離したキャンバス',
-  supportsCourse: false, // 平地のみ（地形走破は RL リプレイで再生）
-  rlCourse: 'progression', // RL 方策は進行性コース（障害物→階段→テーブル）で学習・記録
+  subtitle: 'MuJoCo 蛇: コース選択 × 基盤歩容(scripted) vs 汎用RL方策',
+  supportsCourse: true, // コース選択可能。scripted=基盤登坂歩容、RL=コース汎用方策の録画。
   params: [
     // --- 関節構成（モルフォロジー: 歩容ではないので最適化対象外） ---
     {
       key: 'pattern',
-      label: '関節(0=横うねり,1=サイドワインド,2=尺取り)',
+      label: '関節(0=横うねり,1=yaw/pitch交互,2=尺取り)',
       min: 0,
       max: 2,
       step: 1,
-      default: 1, // 既定でサイドワインド（3D歩容）を見せる。0=平面横うねり / 2=尺取り。
+      default: 1, // alt-yaw-pitch（yaw 前進＋pitch 持ち上げ＝登坂前進。位相差を上げるとサイドワインド）。
       optimize: false,
     },
     // --- 歩容 ---
@@ -138,7 +137,7 @@ export const snake3dMechanism: Mechanism = {
       min: 0,
       max: 0.9,
       step: 0.05,
-      default: D.yawAmp,
+      default: 0.6, // 基盤登坂歩容（RL の土台）と一致＝コースを +x へ前進
       unit: 'rad',
     },
     {
@@ -147,17 +146,17 @@ export const snake3dMechanism: Mechanism = {
       min: 0,
       max: 0.9,
       step: 0.05,
-      default: D.pitchAmp,
+      default: 0.35, // 段差を越える持ち上げ
       unit: 'rad',
     },
     {
-      // サイドワインドは yaw と pitch の位相差で決まる: 0/π≒横うねり、π/2≒斜め移動（サイドワインド）。
+      // 位相差: 0≒登坂前進（yaw 前進＋pitch 持ち上げ）、π/2≒斜め移動（サイドワインド）。既定は登坂=0。
       key: 'yawPitchPhase',
       label: 'yaw-pitch位相差',
       min: 0,
       max: 3.14,
       step: 0.13,
-      default: D.yawPitchPhase,
+      default: 0,
       unit: 'rad',
     },
     {
@@ -166,12 +165,13 @@ export const snake3dMechanism: Mechanism = {
       min: 0.8,
       max: 2.4,
       step: 0.05,
-      default: D.period,
+      default: 1.2,
       unit: 's',
     },
     { key: 'waveLength', label: '波長(リンク数)', min: 4, max: 12, step: 1, default: D.waveLength },
   ],
   async run(ctx: MechRunCtx): Promise<MechReplay> {
+    const hasTerrain = ctx.course.length > 0;
     const replay = await runSnake3D(
       {
         pattern: patternFrom(ctx.params.pattern),
@@ -180,6 +180,11 @@ export const snake3dMechanism: Mechanism = {
         yawPitchPhase: ctx.params.yawPitchPhase,
         period: ctx.params.period,
         waveLength: Math.round(ctx.params.waveLength),
+        // コースは +x に並ぶので波の空間位相を反転して +x へ前進（RL の基盤歩容と同じ）。
+        waveSign: -1,
+        terrain: ctx.course,
+        // 地形コースは長いので時間を伸ばす（平地は短めで十分）。
+        duration: hasTerrain ? 28 : 12,
         motor: { ...D.motor, maxTorqueNm: ctx.torqueCapNm },
       },
       60,

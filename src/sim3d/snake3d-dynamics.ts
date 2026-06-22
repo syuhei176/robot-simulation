@@ -77,6 +77,91 @@ export function makeProgressionTerrain(): SnakeTerrainBox[] {
   return boxes;
 }
 
+/**
+ * 「直進チャレンジ」コース（小障害物 → 2cm 階段 → 長い踊り場・壁なし）を +x 方向に並べる。
+ *
+ * makeProgressionTerrain との違い: テーブル壁を置かず踊り場を遠くまで延ばす。狙いは前進(x)に上限を
+ * 作らないこと。基盤歩容は障害物＋階段で進行方向を蹴られ、その後も開ループのまま斜行を続ける
+ * （平地では真っ直ぐ進めるのに、コースでは ~-40° へ veer して前進を浪費する）。前進 x が壁でキャップ
+ * されないので、「進行方向を検知して +x へ操舵し直す」閉ループ方策＝RL が、浪費される横移動を前進へ
+ * 変換して基盤を明確に上回れる。`plateauEndX` まで踊り場（z=topZ）が続く。
+ */
+export function makeStraightChallengeTerrain(plateauEndX = 12.0): SnakeTerrainBox[] {
+  const halfY = 3.0; // 横（y）に広く張る（接触で回り込めないように＝壁ではなく床として）
+  const boxes: SnakeTerrainBox[] = [];
+  const box = (cx: number, cz: number, halfX: number, halfZ: number): void => {
+    boxes.push({ cx, cz, cy: 0, halfX, halfY, halfZ });
+  };
+  // 1) 小障害物 ×3（高さ 2cm）。
+  for (let i = 0; i < 3; i++) box(1.7 + i * 0.26, 0.01, 0.05, 0.01);
+  // 2) 階段 ×3（rise 2cm・踏面 0.18m、上面 2/4/6cm）＝基盤が登れる高さ。
+  const stairStartX = 2.7;
+  const tread = 0.18;
+  for (let i = 0; i < 3; i++) {
+    const h = (i + 1) * 0.02;
+    box(stairStartX + i * tread + tread / 2, h / 2, tread / 2, h / 2);
+  }
+  // 3) 階段上面（6cm）から遠くまで続く踊り場。壁なし＝前進 x に上限を作らない。
+  const topZ = 0.06;
+  const stairTopX = stairStartX + 3 * tread; // 3.24
+  box((stairTopX + plateauEndX) / 2, topZ / 2, (plateauEndX - stairTopX) / 2, topZ / 2);
+  return boxes;
+}
+
+/**
+ * ランダムなコースを1つ生成する（ドメインランダム化の素）。障害物数・段高(≤2cm=基盤が登れる)・段数・
+ * 踊り場長・終端壁の有無をランダムに振る。蛇は常に x∈[0,1.05] の平地に生成され +x へ進むので、
+ * 地形は x≥1.5 から置く。`rng` は [0,1) を返す乱数（既定 Math.random）。
+ */
+export function makeRandomCourse(rng: () => number = Math.random): SnakeTerrainBox[] {
+  const halfY = 3.0;
+  const boxes: SnakeTerrainBox[] = [];
+  const box = (cx: number, cz: number, halfX: number, halfZ: number): void => {
+    boxes.push({ cx, cz, cy: 0, halfX, halfY, halfZ });
+  };
+  // 小障害物 0〜3 個（高さ 2cm・位置を少し揺らす）。
+  const nBumps = Math.floor(rng() * 4);
+  for (let i = 0; i < nBumps; i++) box(1.5 + i * 0.26 + rng() * 0.12, 0.01, 0.05, 0.01);
+  // 階段 0〜3 段（rise 1.5〜2cm＝基盤が登れる高さ）。
+  const nStairs = Math.floor(rng() * 4);
+  const rise = 0.015 + rng() * 0.005;
+  const stairStartX = 2.5 + rng() * 0.4;
+  const tread = 0.18;
+  let topZ = 0;
+  for (let i = 0; i < nStairs; i++) {
+    const h = (i + 1) * rise;
+    box(stairStartX + i * tread + tread / 2, h / 2, tread / 2, h / 2);
+    topZ = h;
+  }
+  // 踊り場（階段がある時のみ・上面 topZ）を遠くまで（長さ 3〜10m）伸ばす。
+  const stairTopX = stairStartX + nStairs * tread;
+  const plateauEndX = stairTopX + 3 + rng() * 7;
+  if (topZ > 0)
+    box((stairTopX + plateauEndX) / 2, topZ / 2, (plateauEndX - stairTopX) / 2, topZ / 2);
+  // 30% で終端に高い全幅壁（蛇は越えられず手前で止まる＝壁に直進して止まる挙動を学ぶ）。
+  if (rng() < 0.3) {
+    const wallX = stairTopX + 0.5 + rng() * 1.0;
+    const wallH = 0.12 + rng() * 0.06;
+    box(wallX, topZ + wallH / 2, 0.03, wallH / 2);
+  }
+  return boxes;
+}
+
+/**
+ * ドメインランダム化用のコースバンク（コース汎用な単一方策を学習するための地形集合）。
+ * 平地・進行性・直進チャレンジの3つの名前付きコース（汎用性の評価対象）に加えてランダム変種を混ぜる。
+ * 平地を必ず含むのが肝: 「ドリフトしていない時は操舵しない」を学ばせ、特定コースへの過学習（常時操舵バイアス）を防ぐ。
+ */
+export function makeCourseBank(nRandom = 9, rng: () => number = Math.random): SnakeTerrainBox[][] {
+  const bank: SnakeTerrainBox[][] = [
+    [], // 平地
+    makeProgressionTerrain(),
+    makeStraightChallengeTerrain(),
+  ];
+  for (let i = 0; i < nRandom; i++) bank.push(makeRandomCourse(rng));
+  return bank;
+}
+
 export interface Snake3DConfig {
   // ---- 関節構成（JointSpec） ----
   pattern: AxisPattern;

@@ -9,9 +9,7 @@ import { StairDynamicsView } from './render/StairDynamicsView.ts';
 import { getServo, SELECTABLE_SERVO_IDS } from './sim3d/servos.ts';
 import { COURSES, COURSE_OPTIONS, type CourseId } from './sim3d/course.ts';
 import { MECHANISMS, getMechanism } from './mech/registry.ts';
-import { recordedQuadReplay } from './mech/quad.ts';
 import { recordedSnake3DReplay } from './mech/snake3d.ts';
-import type { QuadDynReplay } from './sim3d/quadruped-dynamics.ts';
 import type { Snake3DReplay } from './sim3d/snake3d-dynamics.ts';
 import {
   defaultParamValues,
@@ -47,35 +45,10 @@ const paramSliders = el<HTMLDivElement>('param-sliders');
 const statsBox = el<HTMLDivElement>('stats');
 const mechSubtitle = el<HTMLDivElement>('mech-subtitle');
 const btnScripted = el<HTMLButtonElement>('btn-scripted');
-const btnTuned = el<HTMLButtonElement>('btn-tuned');
 const btnRL = el<HTMLButtonElement>('btn-rl');
 const tunedInfo = el<HTMLDivElement>('tuned-info');
-const improveCurve = el<HTMLCanvasElement>('improve-curve');
-const learnedGait = el<HTMLDivElement>('learned-gait');
+const linkMaterials = el<HTMLAnchorElement>('link-materials');
 const courseRow = selCourse.parentElement as HTMLDivElement; // sel-course を含む .row
-
-// ---- 学習済み歩容（オフライン CMA-ES の成果物）の型 ----
-interface TunedScore {
-  fitness: number;
-  progressM: number;
-  feasible: boolean;
-}
-/** public/tuned/manifest.json の1エントリ（利用可能な最適化結果の一覧）。 */
-interface TunedManifestEntry {
-  file: string;
-  mechanism: string;
-  course: string;
-  motor: string;
-  torqueCapNm: number;
-  baseline: TunedScore;
-  tuned: TunedScore;
-}
-/** public/tuned/<file>.json の全体（params と改善履歴を含む）。 */
-interface TunedRecord extends TunedManifestEntry {
-  optimizedKeys: string[];
-  params: Record<string, number>;
-  history: Array<{ gen: number; best: number; mean: number; progressM: number }>;
-}
 
 // ---- RL 方策（オフライン PPO の成果物・決定論ロールアウトの記録）の型 ----
 /** public/policies/manifest.json の1エントリ。 */
@@ -87,27 +60,26 @@ interface PolicyManifestEntry {
   mass: number;
   base: string;
   forwardM: number;
+  baseForwardM?: number; // 基盤歩容（残差0）の前進量。あれば「基盤→RL」の上乗せを表示する
   fell: boolean;
 }
-/** public/policies/<file>.replay.json（meta + 記録リプレイ）。機構ごとに replay の型が異なる。 */
+/** public/policies/<file>.replay.json（meta + 記録リプレイ）。 */
 interface PolicyReplayFile {
   meta: PolicyManifestEntry;
-  replay: QuadDynReplay | Snake3DReplay;
+  replay: Snake3DReplay;
 }
 
-type MotionMode = 'scripted' | 'tuned' | 'rl';
+type MotionMode = 'scripted' | 'rl';
 
-// UI は MuJoCo 蛇に特化する: ドロップダウンには蛇機構のみ出す（他機構のコードは scripts が使うので
-// レジストリ自体は残し、ここで表示を絞るだけ）。歩容形態（横うねり/サイドワインド/尺取り）は
-// snake3d 1機構の pattern スライダーで賄うので、機構の選択肢はこれだけで足りる。
-const UI_MECH_IDS = ['snake3d'];
-const UI_MECHANISMS = MECHANISMS.filter((m) => UI_MECH_IDS.includes(m.id));
+// 本プロジェクトは MuJoCo 蛇（snake3d）専用。registry は snake3d のみだが、将来の拡張に備え一覧から生成する。
+const UI_MECHANISMS = MECHANISMS;
 
 // ---- 状態 ----
-// 既定は「MuJoCo 蛇3D × SCS0009 × 平地」= サイドワインド（3D歩容）が安サーボの cap 内で出るデモ。
+// 既定は「直進チャレンジ × MG996R」。scripted=基盤歩容が地形に蹴られ斜行 → RL ボタンで汎用方策が
+// +x へ操舵し直す様子（基盤 555cm → RL 839cm/+51%）を見せる。コースを切り替えても同じ汎用方策が再生される。
 let mechId = UI_MECHANISMS[0].id;
-let courseId: CourseId = 'flat';
-let motorId = 'scs0009';
+let courseId: CourseId = 'challenge';
+let motorId = 'mg996r';
 let torqueCapNm = getServo(motorId).stallNm;
 let paramValues: Record<string, number> = defaultParamValues(getMechanism(mechId));
 let replay: MechReplay | null = null;
@@ -116,10 +88,8 @@ let playbackTime = 0;
 let speed = 1;
 let loadSeq = 0;
 let lastTimestamp: number | null = null;
-let manifest: TunedManifestEntry[] = [];
 let policyManifest: PolicyManifestEntry[] = [];
 let motionMode: MotionMode = 'scripted';
-const tunedCache = new Map<string, TunedRecord>();
 const policyCache = new Map<string, PolicyReplayFile>();
 // scripted 物理計算は決定論的（同じ 機構×コース×モーター×cap×params なら同結果）だが、
 // メインスレッドで数秒かかる。結果を入力キーでメモ化し、過去に見た構成への再選択を即時化する。
@@ -230,30 +200,11 @@ function renderStats(rows: StatRow[]): void {
   }
 }
 
-// ---- 学習済み歩容（tuned）の解決・読み込み・適用 ----
-/** tuned/RL 照合に使うコース名。rlCourse 指定があれば優先（蛇3D は進行性コースで学習）。 */
+// ---- RL 成果物（記録リプレイ）の解決・読み込み ----
+/** RL 成果物を照合するコース名。コース対応機構なら選択中のコース、非対応なら平地。 */
 function effectiveCourse(): string {
   const mech = getMechanism(mechId);
-  return mech.rlCourse ?? (mech.supportsCourse ? courseId : 'flat');
-}
-
-/** 現在の 機構×コース×モーター に対応する最適化結果を manifest から探す。 */
-function findTunedEntry(): TunedManifestEntry | null {
-  return (
-    manifest.find(
-      (e) => e.mechanism === mechId && e.motor === motorId && e.course === effectiveCourse(),
-    ) ?? null
-  );
-}
-
-async function loadTunedRecord(entry: TunedManifestEntry): Promise<TunedRecord> {
-  const cached = tunedCache.get(entry.file);
-  if (cached) return cached;
-  const res = await fetch(`./tuned/${entry.file}`);
-  if (!res.ok) throw new Error(`tuned ファイルを取得できません: ${entry.file}`);
-  const record = (await res.json()) as TunedRecord;
-  tunedCache.set(entry.file, record);
-  return record;
+  return mech.supportsCourse ? courseId : 'flat';
 }
 
 /** 現在の 機構×コース×モーター に対応する RL 方策（記録リプレイ）を policy manifest から探す。 */
@@ -275,19 +226,13 @@ async function loadPolicyReplay(entry: PolicyManifestEntry): Promise<PolicyRepla
   return record;
 }
 
-/** scripted/tuned/RL ボタンの有効/無効と選択状態を同期する（無いモードを選んでいたら scripted に戻す）。 */
+/** scripted/RL ボタンの有効/無効と選択状態を同期する（RL が無いコースを選んでいたら scripted に戻す）。 */
 function updateModeAvailability(): void {
-  const hasTuned = findTunedEntry() !== null;
   const hasPolicy = findPolicyEntry() !== null;
-  btnTuned.disabled = !hasTuned;
   btnRL.disabled = !hasPolicy;
-  if (motionMode === 'tuned' && !hasTuned) motionMode = 'scripted';
   if (motionMode === 'rl' && !hasPolicy) motionMode = 'scripted';
   btnScripted.classList.toggle('active', motionMode === 'scripted');
-  btnTuned.classList.toggle('active', motionMode === 'tuned');
   btnRL.classList.toggle('active', motionMode === 'rl');
-  // 学習済み歩容（CMA-ES/RL）の成果物が無い機構（現状の蛇）ではセクションごと隠す。
-  learnedGait.style.display = hasTuned || hasPolicy ? '' : 'none';
 }
 
 function syncTorqueUI(): void {
@@ -295,32 +240,9 @@ function syncTorqueUI(): void {
   torqueCapValue.textContent = `${torqueCapNm.toFixed(2)} N·m`;
 }
 
-// ---- 改善カーブ（世代ごとの best / mean fitness） ----
-function drawImproveCurve(history: TunedRecord['history'] | null): void {
-  const ctx = improveCurve.getContext('2d');
-  if (!ctx) return;
-  const w = improveCurve.width;
-  const h = improveCurve.height;
-  ctx.clearRect(0, 0, w, h);
-  if (!history || history.length < 2) return;
-  const vals = history.flatMap((p) => [p.best, p.mean]);
-  const max = Math.max(...vals);
-  const min = Math.min(...vals);
-  const range = max - min || 1;
-  const plot = (key: 'best' | 'mean', color: string, lineWidth: number): void => {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = lineWidth;
-    ctx.beginPath();
-    history.forEach((p, i) => {
-      const x = (i / (history.length - 1)) * (w - 4) + 2;
-      const y = h - 4 - ((p[key] - min) / range) * (h - 8);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-  };
-  plot('mean', 'rgba(120, 144, 168, 0.7)', 1);
-  plot('best', '#35c8ff', 1.5);
+// 材料表（買い物リスト）リンクへ現在のサーボを引き継ぐ（?motor= で初期選択を合わせる）。
+function syncMaterialsLink(): void {
+  linkMaterials.href = `./materials.html?motor=${encodeURIComponent(motorId)}`;
 }
 
 // ---- 再生コントロール ----
@@ -418,47 +340,35 @@ async function runRL(): Promise<void> {
   if (seq !== loadSeq) return; // 競合ガード
   torqueCapNm = getServo(motorId).stallNm;
   syncTorqueUI();
-  drawImproveCurve(null);
-  tunedInfo.textContent = `RL 方策（土台=${entry.base}）・前進 ${(entry.forwardM * 100).toFixed(0)}cm${entry.fell ? '（破綻）' : ''}`;
+  // 基盤歩容（残差0）の記録があれば「基盤→RL（+N%）」で上乗せを明示する。
+  const rlCm = entry.forwardM * 100;
+  if (entry.baseForwardM !== undefined && entry.baseForwardM > 0) {
+    const baseCm = entry.baseForwardM * 100;
+    const pct = ((rlCm - baseCm) / baseCm) * 100;
+    tunedInfo.textContent =
+      `RL 方策（土台=${entry.base}）・基盤 ${baseCm.toFixed(0)}cm → RL ${rlCm.toFixed(0)}cm ` +
+      `(${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%)${entry.fell ? '（破綻）' : ''}`;
+  } else {
+    tunedInfo.textContent = `RL 方策（土台=${entry.base}）・前進 ${rlCm.toFixed(0)}cm${entry.fell ? '（破綻）' : ''}`;
+  }
   buildParamSliders();
-  // 機構ごとに replay の型・再生器が異なる（蛇3D=Snake3DReplay / 四足=QuadDynReplay）。
-  const rl =
-    mechId === 'snake3d'
-      ? recordedSnake3DReplay(record.replay as Snake3DReplay, getServo(motorId).name, torqueCapNm)
-      : recordedQuadReplay(
-          record.replay as QuadDynReplay,
-          torqueCapNm,
-          getServo(motorId).name,
-          COURSES[courseId](),
-        );
+  const rl = recordedSnake3DReplay(
+    record.replay as Snake3DReplay,
+    getServo(motorId).name,
+    torqueCapNm,
+  );
   applyReplay(rl);
 }
 
-// ---- 選択変更の共通経路: モード可否を更新し、scripted/tuned/RL に応じて歩容を反映して再計算 ----
+// ---- 選択変更の共通経路: モード可否を更新し、scripted（基盤歩容）/RL に応じて再計算 ----
 async function reload(): Promise<void> {
   updateModeAvailability();
-  const mech = getMechanism(mechId);
   if (motionMode === 'rl') {
     await runRL();
     return;
   }
-  const entry = motionMode === 'tuned' ? findTunedEntry() : null;
-  if (entry) {
-    // tuned: 最適化済みの厳密な float をそのまま適用（スライダーの step に丸めない＝崖系でも再現）。
-    const record = await loadTunedRecord(entry);
-    paramValues = { ...defaultParamValues(mech), ...record.params };
-    // τ上限は丸めた JSON 値（torqueCapNm）ではなく、最適化時と同一のサーボ stall を使う。
-    // 崖系（蛇 18cm 階段）では cap の 5e-6 差ですら結果が変わるため、単一の真実=サーボカタログに合わせる。
-    torqueCapNm = getServo(motorId).stallNm;
-    syncTorqueUI();
-    drawImproveCurve(record.history);
-    const b = record.baseline;
-    const t = record.tuned;
-    tunedInfo.textContent = `fitness ${b.fitness.toFixed(2)} → ${t.fitness.toFixed(2)} ・ 前進 ${(b.progressM * 100).toFixed(0)} → ${(t.progressM * 100).toFixed(0)}cm`;
-  } else {
-    drawImproveCurve(null);
-    tunedInfo.textContent = '';
-  }
+  // scripted: 基盤登坂歩容を選択コースでライブ実行。
+  tunedInfo.textContent = '基盤歩容（残差0・開ループ）をコース上でライブ実行';
   buildParamSliders();
   await run();
 }
@@ -468,10 +378,6 @@ function syncMechChrome(): void {
   const mech = getMechanism(mechId);
   mechSubtitle.textContent = mech.subtitle;
   selCourse.disabled = !mech.supportsCourse;
-  selCourse.title = mech.supportsCourse
-    ? 'コース（地形）'
-    : 'この機構は現状 平地のみ（段差走破は後続段）';
-  // 平地固定の機構（蛇）ではコース選択行ごと隠す（地形対応の機構を選んだら出す）。
   courseRow.style.display = mech.supportsCourse ? '' : 'none';
 }
 
@@ -494,6 +400,7 @@ selMotor.addEventListener('change', () => {
   motorId = selMotor.value;
   torqueCapNm = getServo(motorId).stallNm;
   syncTorqueUI();
+  syncMaterialsLink();
   void reload();
 });
 selCourse.addEventListener('change', () => {
@@ -506,11 +413,6 @@ btnScripted.addEventListener('click', () => {
   paramValues = defaultParamValues(getMechanism(mechId));
   torqueCapNm = getServo(motorId).stallNm;
   syncTorqueUI();
-  void reload();
-});
-btnTuned.addEventListener('click', () => {
-  if (motionMode === 'tuned' || btnTuned.disabled) return;
-  motionMode = 'tuned';
   void reload();
 });
 btnRL.addEventListener('click', () => {
@@ -559,14 +461,9 @@ function loop(timestamp: number): void {
 // ---- 起動 ----
 syncMechChrome();
 syncTorqueUI();
+syncMaterialsLink();
 
 async function init(): Promise<void> {
-  try {
-    const res = await fetch('./tuned/manifest.json');
-    if (res.ok) manifest = (await res.json()) as TunedManifestEntry[];
-  } catch {
-    // manifest 不在（オフライン最適化を未実施）は許容。tuned ボタンは無効のまま。
-  }
   try {
     const res = await fetch('./policies/manifest.json');
     if (res.ok) policyManifest = (await res.json()) as PolicyManifestEntry[];
