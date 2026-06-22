@@ -112,6 +112,33 @@ let policyManifest: PolicyManifestEntry[] = [];
 let motionMode: MotionMode = 'scripted';
 const tunedCache = new Map<string, TunedRecord>();
 const policyCache = new Map<string, PolicyReplayFile>();
+// scripted 物理計算は決定論的（同じ 機構×コース×モーター×cap×params なら同結果）だが、
+// メインスレッドで数秒かかる。結果を入力キーでメモ化し、過去に見た構成への再選択を即時化する。
+// frames が嵩むので LRU（最古を退避）で上限を設ける。
+const REPLAY_CACHE_LIMIT = 24;
+const replayCache = new Map<string, MechReplay>();
+
+/** run() の入力（結果を一意に決める）から安定なキャッシュキーを作る。 */
+function runKey(): string {
+  return JSON.stringify({
+    mech: mechId,
+    course: courseId,
+    motor: motorId,
+    cap: torqueCapNm,
+    params: paramValues,
+  });
+}
+
+/** リプレイをキャッシュへ入れる（既存は最新へ詰め直し、上限超過なら最古を退避）。 */
+function cacheReplay(key: string, value: MechReplay): void {
+  replayCache.delete(key); // 末尾（最新）へ移動して LRU の鮮度を保つ
+  replayCache.set(key, value);
+  while (replayCache.size > REPLAY_CACHE_LIMIT) {
+    const oldest = replayCache.keys().next().value;
+    if (oldest === undefined) break;
+    replayCache.delete(oldest);
+  }
+}
 
 // ---- ドロップダウン生成（単一の真実から） ----
 for (const mech of MECHANISMS) {
@@ -300,11 +327,47 @@ function updateControls(): void {
   if (replay) renderStats([...replay.liveStats(playbackTime), ...replay.resultStats()]);
 }
 
-// ---- 実行（機構を走らせてリプレイ生成） ----
+/** ブラウザに1フレーム描画させてから重い同期計算へ入るための yield（「計算中…」を必ず見せる）。 */
+function yieldToPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    // 通常は rAF（描画直前）で macrotask を仕込み、描画後に resolve する。
+    requestAnimationFrame(() => setTimeout(finish, 0));
+    // 非表示タブ等で rAF が発火しない場合でも計算へ進めるフォールバック。
+    setTimeout(finish, 100);
+  });
+}
+
+/** 生成/キャッシュ済みリプレイをビューへ適用し先頭から再生する（run・キャッシュヒット・RL 共通）。 */
+function applyReplay(next: MechReplay): void {
+  replay = next;
+  next.bindView(view);
+  playbackTime = 0;
+  setPlaying(true);
+  next.applyTime(view, 0);
+  updateControls();
+}
+
+// ---- 実行（機構を走らせてリプレイ生成・結果はキャッシュ） ----
 async function run(): Promise<void> {
   const seq = ++loadSeq;
+  const key = runKey();
+  const cached = replayCache.get(key);
+  if (cached) {
+    cacheReplay(key, cached); // LRU 鮮度を更新
+    applyReplay(cached);
+    return;
+  }
   const mech = getMechanism(mechId);
-  renderStats([{ label: '状態', value: '計算中…' }]);
+  renderStats([{ label: '状態', value: '計算中…（数秒かかることがあります）' }]);
+  // 物理ループはメインスレッドを同期占有する。まず1フレーム描画させて「計算中…」を見せてから計算する。
+  await yieldToPaint();
+  if (seq !== loadSeq) return; // paint 待ちの間に新しい実行が始まっていたら破棄
   const next = await mech.run({
     course: COURSES[courseId](),
     torqueCapNm,
@@ -313,12 +376,8 @@ async function run(): Promise<void> {
   });
   // 競合ガード: 新しい実行が始まっていたら破棄
   if (seq !== loadSeq) return;
-  replay = next;
-  replay.bindView(view);
-  playbackTime = 0;
-  setPlaying(true);
-  replay.applyTime(view, 0);
-  updateControls();
+  cacheReplay(key, next);
+  applyReplay(next);
 }
 
 // スライダーのドラッグ連打で物理計算を投げ過ぎないようデバウンス。
@@ -354,12 +413,7 @@ async function runRL(): Promise<void> {
     getServo(motorId).name,
     COURSES[courseId](),
   );
-  replay = rl;
-  rl.bindView(view);
-  playbackTime = 0;
-  setPlaying(true);
-  rl.applyTime(view, 0);
-  updateControls();
+  applyReplay(rl);
 }
 
 // ---- 選択変更の共通経路: モード可否を更新し、scripted/tuned/RL に応じて歩容を反映して再計算 ----
