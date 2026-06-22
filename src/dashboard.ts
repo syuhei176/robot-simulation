@@ -10,7 +10,9 @@ import { getServo, SELECTABLE_SERVO_IDS } from './sim3d/servos.ts';
 import { COURSES, COURSE_OPTIONS, type CourseId } from './sim3d/course.ts';
 import { MECHANISMS, getMechanism } from './mech/registry.ts';
 import { recordedQuadReplay } from './mech/quad.ts';
+import { recordedSnake3DReplay } from './mech/snake3d.ts';
 import type { QuadDynReplay } from './sim3d/quadruped-dynamics.ts';
+import type { Snake3DReplay } from './sim3d/snake3d-dynamics.ts';
 import {
   defaultParamValues,
   type MechParam,
@@ -49,6 +51,8 @@ const btnTuned = el<HTMLButtonElement>('btn-tuned');
 const btnRL = el<HTMLButtonElement>('btn-rl');
 const tunedInfo = el<HTMLDivElement>('tuned-info');
 const improveCurve = el<HTMLCanvasElement>('improve-curve');
+const learnedGait = el<HTMLDivElement>('learned-gait');
+const courseRow = selCourse.parentElement as HTMLDivElement; // sel-course を含む .row
 
 // ---- 学習済み歩容（オフライン CMA-ES の成果物）の型 ----
 interface TunedScore {
@@ -85,18 +89,23 @@ interface PolicyManifestEntry {
   forwardM: number;
   fell: boolean;
 }
-/** public/policies/<file>.replay.json（meta + 記録リプレイ）。 */
+/** public/policies/<file>.replay.json（meta + 記録リプレイ）。機構ごとに replay の型が異なる。 */
 interface PolicyReplayFile {
   meta: PolicyManifestEntry;
-  replay: QuadDynReplay;
+  replay: QuadDynReplay | Snake3DReplay;
 }
 
 type MotionMode = 'scripted' | 'tuned' | 'rl';
 
+// UI は MuJoCo 蛇に特化する: ドロップダウンには蛇機構のみ出す（他機構のコードは scripts が使うので
+// レジストリ自体は残し、ここで表示を絞るだけ）。歩容形態（横うねり/サイドワインド/尺取り）は
+// snake3d 1機構の pattern スライダーで賄うので、機構の選択肢はこれだけで足りる。
+const UI_MECH_IDS = ['snake3d'];
+const UI_MECHANISMS = MECHANISMS.filter((m) => UI_MECH_IDS.includes(m.id));
+
 // ---- 状態 ----
-// 既定は「小型四足 × SCS0009 × 平地」= 150g 級の安価な四足が cap 内で歩くデモ（箱出しで前進する）。
-// 段差走破（合成コース）を見るには 四足 + STS3215（大型機体）+ tuned を選ぶ。
-let mechId = 'quad';
+// 既定は「MuJoCo 蛇3D × SCS0009 × 平地」= サイドワインド（3D歩容）が安サーボの cap 内で出るデモ。
+let mechId = UI_MECHANISMS[0].id;
 let courseId: CourseId = 'flat';
 let motorId = 'scs0009';
 let torqueCapNm = getServo(motorId).stallNm;
@@ -141,13 +150,15 @@ function cacheReplay(key: string, value: MechReplay): void {
 }
 
 // ---- ドロップダウン生成（単一の真実から） ----
-for (const mech of MECHANISMS) {
+for (const mech of UI_MECHANISMS) {
   const option = document.createElement('option');
   option.value = mech.id;
   option.textContent = mech.name;
   selMech.append(option);
 }
 selMech.value = mechId;
+// 蛇機構が1つだけなら機構セレクタは不要なので隠す（増えたら自動で出る）。
+if (UI_MECHANISMS.length <= 1) selMech.style.display = 'none';
 
 for (const id of SELECTABLE_SERVO_IDS) {
   const option = document.createElement('option');
@@ -220,9 +231,10 @@ function renderStats(rows: StatRow[]): void {
 }
 
 // ---- 学習済み歩容（tuned）の解決・読み込み・適用 ----
-/** 非コース機構（四足）は平地固定なので manifest 照合は 'flat' を使う。 */
+/** tuned/RL 照合に使うコース名。rlCourse 指定があれば優先（蛇3D は進行性コースで学習）。 */
 function effectiveCourse(): string {
-  return getMechanism(mechId).supportsCourse ? courseId : 'flat';
+  const mech = getMechanism(mechId);
+  return mech.rlCourse ?? (mech.supportsCourse ? courseId : 'flat');
 }
 
 /** 現在の 機構×コース×モーター に対応する最適化結果を manifest から探す。 */
@@ -274,6 +286,8 @@ function updateModeAvailability(): void {
   btnScripted.classList.toggle('active', motionMode === 'scripted');
   btnTuned.classList.toggle('active', motionMode === 'tuned');
   btnRL.classList.toggle('active', motionMode === 'rl');
+  // 学習済み歩容（CMA-ES/RL）の成果物が無い機構（現状の蛇）ではセクションごと隠す。
+  learnedGait.style.display = hasTuned || hasPolicy ? '' : 'none';
 }
 
 function syncTorqueUI(): void {
@@ -405,14 +419,18 @@ async function runRL(): Promise<void> {
   torqueCapNm = getServo(motorId).stallNm;
   syncTorqueUI();
   drawImproveCurve(null);
-  tunedInfo.textContent = `RL 方策（土台=${entry.base}）・前進 ${(entry.forwardM * 100).toFixed(0)}cm${entry.fell ? '（転倒）' : ''}`;
+  tunedInfo.textContent = `RL 方策（土台=${entry.base}）・前進 ${(entry.forwardM * 100).toFixed(0)}cm${entry.fell ? '（破綻）' : ''}`;
   buildParamSliders();
-  const rl = recordedQuadReplay(
-    record.replay,
-    torqueCapNm,
-    getServo(motorId).name,
-    COURSES[courseId](),
-  );
+  // 機構ごとに replay の型・再生器が異なる（蛇3D=Snake3DReplay / 四足=QuadDynReplay）。
+  const rl =
+    mechId === 'snake3d'
+      ? recordedSnake3DReplay(record.replay as Snake3DReplay, getServo(motorId).name, torqueCapNm)
+      : recordedQuadReplay(
+          record.replay as QuadDynReplay,
+          torqueCapNm,
+          getServo(motorId).name,
+          COURSES[courseId](),
+        );
   applyReplay(rl);
 }
 
@@ -445,18 +463,25 @@ async function reload(): Promise<void> {
   await run();
 }
 
-// ---- 機構切替: 既定歩容へ戻し・コース有効化・再計算（scripted から開始） ----
-function applyMechanism(): void {
+// ---- 機構に応じた周辺UI（副題・コース選択の有効/可視）の同期。起動時と機構切替の両方で使う。 ----
+function syncMechChrome(): void {
   const mech = getMechanism(mechId);
   mechSubtitle.textContent = mech.subtitle;
-  motionMode = 'scripted';
-  paramValues = defaultParamValues(mech);
-  torqueCapNm = getServo(motorId).stallNm;
-  syncTorqueUI();
   selCourse.disabled = !mech.supportsCourse;
   selCourse.title = mech.supportsCourse
     ? 'コース（地形）'
     : 'この機構は現状 平地のみ（段差走破は後続段）';
+  // 平地固定の機構（蛇）ではコース選択行ごと隠す（地形対応の機構を選んだら出す）。
+  courseRow.style.display = mech.supportsCourse ? '' : 'none';
+}
+
+// ---- 機構切替: 既定歩容へ戻し・コース有効化・再計算（scripted から開始） ----
+function applyMechanism(): void {
+  motionMode = 'scripted';
+  paramValues = defaultParamValues(getMechanism(mechId));
+  torqueCapNm = getServo(motorId).stallNm;
+  syncTorqueUI();
+  syncMechChrome();
   void reload();
 }
 
@@ -532,7 +557,7 @@ function loop(timestamp: number): void {
 }
 
 // ---- 起動 ----
-mechSubtitle.textContent = getMechanism(mechId).subtitle;
+syncMechChrome();
 syncTorqueUI();
 
 async function init(): Promise<void> {

@@ -18,7 +18,18 @@
     "motorName": "Feetech SCS0009 (6V)",
     "mass": 0.15,
     "base": "tuned歩容(quad-flat-scs0009.json)",
-    "forwardM": 0.5403,
+    "forwardM": 0.5404,
+    "fell": false
+  },
+  {
+    "file": "snake3d-progression-mg996r.replay.json",
+    "mechanism": "snake3d",
+    "course": "progression",
+    "motor": "mg996r",
+    "motorName": "MG996R (6V)",
+    "mass": 0.6,
+    "base": "climb-gait",
+    "forwardM": 3.0332,
     "fell": false
   }
 ]

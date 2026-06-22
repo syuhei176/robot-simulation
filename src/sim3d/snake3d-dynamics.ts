@@ -17,6 +17,66 @@ import { getMujoco, type MujocoModule } from './mujoco-engine.ts';
 export type AxisPattern = 'all-yaw' | 'all-pitch' | 'alt-yaw-pitch';
 export type JointAxis = 'yaw' | 'pitch';
 
+/**
+ * 地形の箱（矢状面 x-z ＋ 横幅 y）。MuJoCo の box geom 兼、接地ゲート用の局所地形上面の真実。
+ * 蛇は実接触で段に体を押し付けて登るので、地形は「異方力場の抽象」ではなく本物の剛体として置く。
+ */
+export interface SnakeTerrainBox {
+  cx: number;
+  cz: number;
+  cy: number;
+  halfX: number;
+  halfY: number;
+  halfZ: number;
+}
+
+/** (x,y) を覆う地形箱の最大上面 z（無ければ地面 0）。接地判定と前方プレビュー観測に使う。 */
+export function snakeTerrainTopAt(boxes: SnakeTerrainBox[], x: number, y: number): number {
+  let top = 0;
+  for (const b of boxes) {
+    if (Math.abs(x - b.cx) <= b.halfX && Math.abs(y - b.cy) <= b.halfY) {
+      top = Math.max(top, b.cz + b.halfZ);
+    }
+  }
+  return top;
+}
+
+/**
+ * だんだん難しくなる進行性コース（小障害物 → 階段 → 低いテーブル）を +x 方向に並べる。
+ * 蛇は x∈[0, n·segLen] に横たわって生成され、+x へ進む（waveSign=-1）。各要素は横幅 y を広く取り
+ * （回り込み防止）、高さは控えめ（蛇の段差越えは四足より難しい）。テーブルは到達するが突破は必須にしない。
+ */
+export function makeProgressionTerrain(): SnakeTerrainBox[] {
+  const halfY = 3.0; // 横（y）に広く張って蛇が回り込めないように（蛇は y へ大きくドリフトしうる）
+  const boxes: SnakeTerrainBox[] = [];
+  const box = (cx: number, cz: number, halfX: number, halfZ: number): void => {
+    boxes.push({ cx, cz, cy: 0, halfX, halfY, halfZ });
+  };
+  // 1) 小障害物 ×3（高さ 2cm）。頭の初期位置(≈+1.12)の少し先から。
+  for (let i = 0; i < 3; i++) box(1.7 + i * 0.26, 0.01, 0.05, 0.01);
+  // 2) 階段 ×3（rise 2cm・踏面 0.18m、上面 2/4/6cm）。各段は床から立つ実体ブロック。
+  const stairStartX = 2.7;
+  const tread = 0.18;
+  for (let i = 0; i < 3; i++) {
+    const h = (i + 1) * 0.02;
+    box(stairStartX + i * tread + tread / 2, h / 2, tread / 2, h / 2);
+  }
+  const topZ = 0.06; // 階段上面
+  // 階段上〜テーブル下までを覆う踊り場（蛇は z=topZ の床を進み、テーブルの脚はこの上に立つ）。
+  const stairTopX = stairStartX + 3 * tread; // 3.24
+  const plateauEndX = stairTopX + 1.4;
+  box((stairTopX + plateauEndX) / 2, topZ / 2, (plateauEndX - stairTopX) / 2, topZ / 2);
+  // 3) 低いテーブル（脚2本＋天板）。脚は踊り場(z=topZ)から立つ実体の壁＝今は越えられない最終要素。
+  // 将来「脚をつたって天板へ登る」モデルの土台。
+  const tableX = stairTopX + 0.65;
+  const legTop = topZ + 0.16; // 天板下端＝踊り場から 16cm（体径 3cm の ~5倍。今は越えられない最終壁）
+  const legHalf = 0.02;
+  box(tableX - 0.18, (topZ + legTop) / 2, legHalf, (legTop - topZ) / 2); // 手前脚（踊り場→天板下）
+  box(tableX + 0.18, (topZ + legTop) / 2, legHalf, (legTop - topZ) / 2); // 奥脚
+  box(tableX, legTop + 0.015, 0.24, 0.015); // 天板（厚 3cm）
+  return boxes;
+}
+
 export interface Snake3DConfig {
   // ---- 関節構成（JointSpec） ----
   pattern: AxisPattern;
@@ -26,6 +86,10 @@ export interface Snake3DConfig {
   // ---- 機体 ----
   totalMass: number;
   groundFriction: number;
+  // ---- 地形（空なら平地） ----
+  terrain: SnakeTerrainBox[];
+  // 進行方向: 波の空間位相の符号。+1=現状(−x へ進む)、−1=+x へ進む（地形コースは +x に並ぶので −1）。
+  waveSign: number;
   // ---- 歩容（パラメタ化セルペノイド波） ----
   yawAmp: number; // 水平関節の振幅 [rad]
   pitchAmp: number; // 垂直関節の振幅 [rad]
@@ -48,10 +112,12 @@ export const DEFAULT_SNAKE3D_CONFIG: Snake3DConfig = {
   bodyWidth: 0.03,
   totalMass: 0.6,
   groundFriction: 0.1,
+  terrain: [],
+  waveSign: 1,
   yawAmp: 0.5,
-  pitchAmp: 0,
+  pitchAmp: 0.35, // 既定で 3D（サイドワインド）が出る垂直振幅。pattern=all-yaw では未使用。
   period: 1.4,
-  waveLength: 8,
+  waveLength: 10, // 長めの波長＋pitch=0.35＋位相 90° で alt-yaw-pitch がクリーンにサイドワインド（~98cm）。
   yawPitchPhase: Math.PI / 2,
   kLat: 12,
   kFwd: 0.6,
@@ -91,7 +157,9 @@ export interface SnakeFrame {
 
 export interface Snake3DSummary {
   config: Snake3DConfig;
-  travelM: number;
+  travelM: number; // 正味変位の大きさ |Δ(COM)|（向きに依らない総移動）
+  netDispM: [number, number]; // 正味変位ベクトル [Δx, Δy]（サイドワインドの斜め移動を表す）
+  headingDeg: number; // 進行方向（+x を 0°、+y を 90° とする方位）
   maxDemandNm: number;
   maxAppliedNm: number;
   saturatedSteps: number;
@@ -107,7 +175,7 @@ export interface Snake3DReplay {
 type V3 = [number, number, number];
 type Quat = [number, number, number, number]; // x,y,z,w
 
-function qRotate(q: Quat, v: V3): V3 {
+export function qRotate(q: Quat, v: V3): V3 {
   const [x, y, z, w] = q;
   const ix = w * v[0] + y * v[2] - z * v[1];
   const iy = w * v[1] + z * v[0] - x * v[2];
@@ -128,7 +196,7 @@ function f(x: number): string {
   return x.toFixed(6);
 }
 
-function buildMjcf(cfg: Snake3DConfig, axes: JointAxis[], physicsDt: number): string {
+export function buildMjcf(cfg: Snake3DConfig, axes: JointAxis[], physicsDt: number): string {
   const halfW = cfg.bodyWidth / 2;
   const capHalf = Math.max(0.001, cfg.segLen / 2 - halfW);
   const linkMass = cfg.totalMass / cfg.n;
@@ -154,10 +222,17 @@ function buildMjcf(cfg: Snake3DConfig, axes: JointAxis[], physicsDt: number): st
   }
   for (let i = cfg.n - 1; i >= 0; i--) lines.push('      ' + '  '.repeat(i) + '</body>');
 
+  // 地形箱（実接触の剛体）。蛇はこれに体を押し付けて段を登る。摩擦は床と同じ μ。
+  const terrainLines = cfg.terrain.map(
+    (b, i) =>
+      `    <geom name="terrain${i}" type="box" pos="${f(b.cx)} ${f(b.cy)} ${f(b.cz)}" size="${f(b.halfX)} ${f(b.halfY)} ${f(b.halfZ)}" friction="${mu} 0.01 0.001" rgba="0.36 0.42 0.5 1"/>`,
+  );
+
   return `<mujoco model="snake3d">
   <option gravity="0 0 -9.81" timestep="${f(physicsDt)}" integrator="implicitfast"/>
   <worldbody>
-    <geom name="ground" type="plane" size="5 5 0.1" pos="0 0 0" friction="${mu} 0.005 0.0001"/>
+    <geom name="ground" type="plane" size="8 8 0.1" pos="0 0 0" friction="${mu} 0.005 0.0001"/>
+${terrainLines.join('\n')}
 ${lines.join('\n')}
   </worldbody>
 </mujoco>`;
@@ -234,8 +309,12 @@ export async function runSnake3D(
         prevPos[i][0] = px;
         prevPos[i][1] = py;
         prevPos[i][2] = pz;
-        if (pz > groundGate) {
-          driveForce.push([0, 0, 0]); // 持ち上がっているリンクには掛けない
+        // 接地判定は「局所地形上面からの高さ」で行う（段の上・縁でも牽引が効くように）。
+        // 段の手前では top=0（地面）なので、リンクは接地扱い→水平牽引が段の縦面へ押し付け、
+        // pitch の持ち上げと相まって体が段へ乗り上がる（実接触は MuJoCo が解く）。
+        const top = cfg.terrain.length > 0 ? snakeTerrainTopAt(cfg.terrain, px, py) : 0;
+        if (pz - top > groundGate) {
+          driveForce.push([0, 0, 0]); // 局所地形から持ち上がっているリンクには掛けない
           continue;
         }
         const q: Quat = [
@@ -269,7 +348,8 @@ export async function runSnake3D(
         const isYaw = axes[j] === 'yaw';
         const amp = isYaw ? cfg.yawAmp : cfg.pitchAmp;
         const phase = isYaw ? 0 : cfg.yawPitchPhase;
-        const target = amp * Math.sin((2 * Math.PI * ts) / cfg.period - j * spatialPhase + phase);
+        const target =
+          amp * Math.sin((2 * Math.PI * ts) / cfg.period - cfg.waveSign * j * spatialPhase + phase);
         const angle = qpos[7 + j];
         const vel = qvel[6 + j];
         const raw = cfg.motor.stiffness * (target - angle) - cfg.motor.damping * vel;
@@ -314,10 +394,14 @@ export async function runSnake3D(
   }
 
   const [cx, cy] = com();
-  const travelM = Math.hypot(cx - startX, cy - startY);
+  const dx = cx - startX;
+  const dy = cy - startY;
+  const travelM = Math.hypot(dx, dy);
   const summary: Snake3DSummary = {
     config: cfg,
     travelM,
+    netDispM: [dx, dy],
+    headingDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
     maxDemandNm,
     maxAppliedNm,
     saturatedSteps,

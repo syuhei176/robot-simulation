@@ -47,6 +47,7 @@ export class StairDynamicsView {
   private readonly snake3dMeshes: THREE.Mesh[] = [];
   private readonly snake3dMaterials: THREE.MeshStandardMaterial[] = [];
   private readonly snake3dDecor = new THREE.Group(); // trail / 目盛り / 開始マーカー（group 配下＝z-up）
+  private readonly snake3dTerrain = new THREE.Group(); // 進行性コースの地形箱（group 配下＝z-up）
   private snake3dHeadDot: THREE.Mesh | null = null;
   private readonly tmpVec = new THREE.Vector3();
   private readonly tmpQuat = new THREE.Quaternion();
@@ -76,6 +77,7 @@ export class StairDynamicsView {
     this.quadGroup.visible = false;
     this.snake3dGroup.rotation.x = -Math.PI / 2; // sim z-up → three y-up
     this.snake3dGroup.add(this.snake3dDecor);
+    this.snake3dGroup.add(this.snake3dTerrain);
     this.scene.add(this.snake3dGroup);
     this.snake3dGroup.visible = false;
 
@@ -125,9 +127,10 @@ export class StairDynamicsView {
    * 子はシム座標(p,q)のまま置ける。カプセルは three では Y 軸長手なので Z まわり 90° で X 長手にする。
    */
   buildSnake3D(layout: Array<{ half: [number, number, number] }>): void {
-    this.snake3dGroup.clear(); // decor 含め全消去 → decor を付け直す
+    this.snake3dGroup.clear(); // decor / terrain 含め全消去 → 付け直す
     this.snake3dDecor.clear();
     this.snake3dGroup.add(this.snake3dDecor);
+    this.snake3dGroup.add(this.snake3dTerrain);
     this.snake3dMeshes.length = 0;
     this.snake3dMaterials.length = 0;
     this.snake3dHeadDot = null;
@@ -151,6 +154,42 @@ export class StairDynamicsView {
       this.snake3dGroup.add(mesh);
       this.snake3dMeshes.push(mesh);
       this.snake3dMaterials.push(material);
+    }
+  }
+
+  /**
+   * 進行性コースの地形（小障害物→階段→テーブル）を箱メッシュで描く。物理は横(y)に広い壁だが、
+   * 描画は障害物として見えるよう y 幅を表示用に詰める（snake の進路を塞ぐ段として読める）。
+   */
+  setSnake3DTerrain(
+    boxes: Array<{
+      cx: number;
+      cy: number;
+      cz: number;
+      halfX: number;
+      halfY: number;
+      halfZ: number;
+    }>,
+  ): void {
+    this.snake3dTerrain.clear();
+    for (const b of boxes) {
+      const dispHalfY = Math.min(b.halfY, 0.45); // 物理の全幅壁は描画では障害物幅に詰める
+      const geom = new THREE.BoxGeometry(b.halfX * 2, dispHalfY * 2, b.halfZ * 2);
+      const isOverhang = b.cz - b.halfZ > 0.12; // テーブル天板（頭上の張り出し）
+      const mesh = new THREE.Mesh(
+        geom,
+        new THREE.MeshStandardMaterial({
+          color: isOverhang ? 0x5a4636 : 0x42505e,
+          roughness: 0.85,
+          metalness: 0.05,
+          transparent: isOverhang,
+          opacity: isOverhang ? 0.6 : 1,
+        }),
+      );
+      mesh.position.set(b.cx, b.cy, b.cz);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      this.snake3dTerrain.add(mesh);
     }
   }
 
@@ -179,29 +218,38 @@ export class StairDynamicsView {
     start.position.set(headPts[0][0], headPts[0][1], 0.003);
     this.snake3dDecor.add(start);
 
-    // 距離目盛り（x 方向 0.25m 毎の横線）。軌跡の x 範囲を覆う。
+    // 距離グリッド（0.25m 毎の格子）。サイドワインドは斜めに進むので x/y 両方向に線を引き、
+    // どの向きの移動も読めるようにする。軌跡の bbox（少し余白）を覆う。
     let minX = Infinity;
     let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
     for (const p of headPts) {
       minX = Math.min(minX, p[0]);
       maxX = Math.max(maxX, p[0]);
+      minY = Math.min(minY, p[1]);
+      maxY = Math.max(maxY, p[1]);
     }
     const tickMat = new THREE.LineBasicMaterial({
       color: 0x4c5560,
       transparent: true,
       opacity: 0.6,
     });
-    const lo = Math.floor(minX / 0.25) * 0.25;
-    const hi = Math.ceil(maxX / 0.25) * 0.25;
-    for (let x = lo; x <= hi + 1e-9; x += 0.25) {
-      const tick = new THREE.Line(
-        new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(x, -0.15, 0.001),
-          new THREE.Vector3(x, 0.15, 0.001),
-        ]),
-        tickMat,
+    const G = 0.25;
+    const gx0 = Math.floor((minX - G) / G) * G;
+    const gx1 = Math.ceil((maxX + G) / G) * G;
+    const gy0 = Math.floor((minY - G) / G) * G;
+    const gy1 = Math.ceil((maxY + G) / G) * G;
+    const addLine = (a: THREE.Vector3, b: THREE.Vector3): void => {
+      this.snake3dDecor.add(
+        new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), tickMat),
       );
-      this.snake3dDecor.add(tick);
+    };
+    for (let x = gx0; x <= gx1 + 1e-9; x += G) {
+      addLine(new THREE.Vector3(x, gy0, 0.001), new THREE.Vector3(x, gy1, 0.001));
+    }
+    for (let y = gy0; y <= gy1 + 1e-9; y += G) {
+      addLine(new THREE.Vector3(gx0, y, 0.001), new THREE.Vector3(gx1, y, 0.001));
     }
 
     // 頭の現在位置ドット（毎フレーム更新）。

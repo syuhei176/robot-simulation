@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Microbots — 機構 × コース × モーション</title>
+    <title>Microbots — MuJoCo 蛇シミュレータ</title>
     <style>
       :root {
         --accent: #35c8ff;
@@ -160,10 +160,10 @@
     <div id="app"></div>
     <div id="panel">
       <h1 id="title">MICROBOTS</h1>
-      <div class="sub">機構 × コース × モーション</div>
+      <div class="sub">MuJoCo 蛇 — 関節構成 × 歩容 × モーター選定</div>
       <div class="sub" id="mech-subtitle" style="margin-top: -8px"></div>
       <div class="row">
-        <!-- options populated from MECHANISMS in dashboard.ts -->
+        <!-- options populated from UI_MECHANISMS (snake-only) in dashboard.ts; hidden when single -->
         <select id="sel-mech"></select>
         <!-- options populated from SELECTABLE_SERVO_IDS in dashboard.ts -->
         <select id="sel-motor"></select>
@@ -185,18 +185,24 @@
       <div class="section-title">モーション（初期歩容を与える）</div>
       <!-- sliders injected from mechanism.params in dashboard.ts -->
       <div id="param-sliders"></div>
-      <div class="section-title">学習済み歩容（CMA-ES / RL）</div>
-      <div class="row">
-        <button id="btn-scripted" class="active">scripted</button>
-        <button id="btn-tuned" disabled title="この 機構×コース×モーター の最適化結果はありません">
-          tuned
-        </button>
-        <button id="btn-rl" disabled title="この 機構×コース×モーター の RL 方策はありません">
-          RL
-        </button>
+      <div id="learned-gait">
+        <div class="section-title">学習済み歩容（CMA-ES / RL）</div>
+        <div class="row">
+          <button id="btn-scripted" class="active">scripted</button>
+          <button
+            id="btn-tuned"
+            disabled
+            title="この 機構×コース×モーター の最適化結果はありません"
+          >
+            tuned
+          </button>
+          <button id="btn-rl" disabled title="この 機構×コース×モーター の RL 方策はありません">
+            RL
+          </button>
+        </div>
+        <div class="tuned-info" id="tuned-info"></div>
+        <canvas id="improve-curve" width="304" height="56"></canvas>
       </div>
-      <div class="tuned-info" id="tuned-info"></div>
-      <canvas id="improve-curve" width="304" height="56"></canvas>
       <!-- rows injected from liveStats()/resultStats() in dashboard.ts -->
       <div class="stats" id="stats"></div>
     </div>

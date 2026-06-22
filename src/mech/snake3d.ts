@@ -35,6 +35,7 @@ class Snake3DMechReplay implements MechReplay {
   bindView(view: StairDynamicsView): void {
     view.setMechanism('snake3d');
     view.buildSnake3D(this.replay.layout);
+    view.setSnake3DTerrain(this.replay.summary.config.terrain); // 進行性コースの地形（平地なら空）
     // 頭（末尾リンク）の全軌跡を渡して trail / 目盛り / 開始マーカーを描く（移動が一目で分かる）。
     const headIdx = this.replay.layout.length - 1;
     const headPts = this.replay.frames.map(
@@ -80,12 +81,18 @@ class Snake3DMechReplay implements MechReplay {
 
   resultStats(): StatRow[] {
     const s = this.replay.summary;
+    const [dx, dy] = s.netDispM;
     return [
       { label: 'モーター', value: this.motorName },
       {
         label: '移動距離',
         value: `${(s.travelM * 100).toFixed(1)} cm`,
         kind: s.success ? 'good' : 'warn',
+      },
+      {
+        // サイドワインドは体軸(x)と斜めに進むので Δx/Δy と方位を出す（横うねりは ~0°、サイドワインドは斜め）。
+        label: '移動方向',
+        value: `Δx ${(dx * 100).toFixed(0)} / Δy ${(dy * 100).toFixed(0)} cm (${s.headingDeg.toFixed(0)}°)`,
       },
       { label: 'ピーク τ', value: `${s.maxDemandNm.toFixed(2)} N·m` },
       { label: 'モーター τ上限', value: `${this.torqueCapNm.toFixed(2)} N·m` },
@@ -98,20 +105,30 @@ class Snake3DMechReplay implements MechReplay {
   }
 }
 
+/** 記録済み RL リプレイ（決定論ロールアウトの frames）を再生用 MechReplay にする（ダッシュボードの RL ボタン）。 */
+export function recordedSnake3DReplay(
+  replay: Snake3DReplay,
+  motorName: string,
+  torqueCapNm: number,
+): MechReplay {
+  return new Snake3DMechReplay(replay, motorName, torqueCapNm);
+}
+
 export const snake3dMechanism: Mechanism = {
   id: 'snake3d',
   name: '機構: 蛇3D (MuJoCo)',
   subtitle: 'MuJoCo 汎用蛇: 関節構成(JointSpec)×歩容を分離したキャンバス',
-  supportsCourse: false, // 現状は平地のみ（柱登攀は後続）
+  supportsCourse: false, // 平地のみ（地形走破は RL リプレイで再生）
+  rlCourse: 'progression', // RL 方策は進行性コース（障害物→階段→テーブル）で学習・記録
   params: [
     // --- 関節構成（モルフォロジー: 歩容ではないので最適化対象外） ---
     {
       key: 'pattern',
-      label: '関節(0=yaw,1=交互,2=pitch)',
+      label: '関節(0=横うねり,1=サイドワインド,2=尺取り)',
       min: 0,
       max: 2,
       step: 1,
-      default: 0,
+      default: 1, // 既定でサイドワインド（3D歩容）を見せる。0=平面横うねり / 2=尺取り。
       optimize: false,
     },
     // --- 歩容 ---
@@ -134,6 +151,16 @@ export const snake3dMechanism: Mechanism = {
       unit: 'rad',
     },
     {
+      // サイドワインドは yaw と pitch の位相差で決まる: 0/π≒横うねり、π/2≒斜め移動（サイドワインド）。
+      key: 'yawPitchPhase',
+      label: 'yaw-pitch位相差',
+      min: 0,
+      max: 3.14,
+      step: 0.13,
+      default: D.yawPitchPhase,
+      unit: 'rad',
+    },
+    {
       key: 'period',
       label: '波の周期',
       min: 0.8,
@@ -150,6 +177,7 @@ export const snake3dMechanism: Mechanism = {
         pattern: patternFrom(ctx.params.pattern),
         yawAmp: ctx.params.yawAmp,
         pitchAmp: ctx.params.pitchAmp,
+        yawPitchPhase: ctx.params.yawPitchPhase,
         period: ctx.params.period,
         waveLength: Math.round(ctx.params.waveLength),
         motor: { ...D.motor, maxTorqueNm: ctx.torqueCapNm },

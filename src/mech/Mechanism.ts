@@ -80,6 +80,11 @@ export interface Mechanism {
   subtitle: string;
   /** コース（地形）を反映できるか。false の機構ではコース選択を無効化する。 */
   supportsCourse: boolean;
+  /**
+   * tuned/RL 成果物を照合するコース名（manifest の course 列）の上書き。コース選択 UI とは独立に
+   * 学習を別コースで行う機構（蛇3D は RL を進行性コースで学習）に使う。未指定なら従来どおり。
+   */
+  rlCourse?: string;
   /** 歩容＋物理のライブ調整つまみ。ダッシュボードがこの配列からスライダーを動的生成する。 */
   params: MechParam[];
   run(ctx: MechRunCtx): Promise<MechReplay>;
