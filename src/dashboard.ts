@@ -587,7 +587,10 @@ async function startLive(): Promise<void> {
   const cfg = room
     ? roomSnakeEnvConfig({ terrain, motor })
     : defaultSnakeEnvConfig({ terrain, motor });
-  cfg.episodeSteps = 1800; // 終端まで走り、到達したら自動 reset でループ
+  // ライブは「自由走行」: 目標壁で終了させない（壁に着いても戻らず、スライダーで向き直して走り続けられる）。
+  // done はブローアップ安全弁のみに（goal を外す＋実質無制限ステップ）。リセットは「先頭へ」で手動。
+  delete cfg.goal;
+  cfg.episodeSteps = 1_000_000;
   const env = await SnakeEnv.create(cfg);
   if (seq !== loadSeq) {
     env.dispose();
@@ -608,7 +611,7 @@ async function startLive(): Promise<void> {
   else view.setSnake3DLiveGrid([-1, 13], [-2, 2]);
   setPlaying(true);
   tunedInfo.textContent = room
-    ? 'ライブ: 部屋ナビ方策をブラウザ内で駆動。スライダーで目標方位へ即操舵（±90°）。'
+    ? 'ライブ: 部屋ナビ方策をブラウザ内で駆動。スライダーで目標方位へ即操舵（±90°）。自由走行＝壁に着いても戻らず、向き直して継続（リセットは「先頭へ」）。'
     : 'ライブ: 汎用方策をブラウザ内でリアルタイム駆動。スライダーで即操舵。';
   buildParamSliders();
   renderStats(liveStatsRows());
