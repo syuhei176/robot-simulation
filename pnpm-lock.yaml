@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@dimforge/rapier3d-compat':
-        specifier: ^0.19.3
-        version: 0.19.3
       '@mujoco/mujoco':
         specifier: ^3.9.0
         version: 3.9.0
@@ -53,9 +50,6 @@ packages:
 
   '@dimforge/rapier3d-compat@0.12.0':
     resolution: {integrity: sha512-uekIGetywIgopfD97oDL5PfeezkFpNhwlzlaEYNOA0N6ghdsOvh/HYjSMek5Q2O1PYvRSDFcqFVJl4r4ZBwOow==}
-
-  '@dimforge/rapier3d-compat@0.19.3':
-    resolution: {integrity: sha512-mMVdSj1PRTT108s9Swbu2GQOmHbn8kbJANRV5xfczL3s0T4vkgZAuoMRgvBzQcHanpKusbC0ZJj6z3mC3aj3vg==}
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -1106,8 +1100,6 @@ packages:
 snapshots:
 
   '@dimforge/rapier3d-compat@0.12.0': {}
-
-  '@dimforge/rapier3d-compat@0.19.3': {}
 
   '@esbuild/aix-ppc64@0.21.5':
     optional: true
