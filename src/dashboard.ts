@@ -7,7 +7,7 @@
  */
 import { StairDynamicsView } from './render/StairDynamicsView.ts';
 import { getServo, SELECTABLE_SERVO_IDS } from './sim3d/servos.ts';
-import { COURSES, COURSE_OPTIONS, type CourseId } from './sim3d/course.ts';
+import { COURSES, COURSE_OPTIONS, isRoomCourse, type CourseId } from './sim3d/course.ts';
 import { MECHANISMS, getMechanism } from './mech/registry.ts';
 import { recordedSnake3DReplay } from './mech/snake3d.ts';
 import { ROOM, type Snake3DReplay } from './sim3d/snake3d-dynamics.ts';
@@ -100,7 +100,7 @@ const UI_MECHANISMS = MECHANISMS;
 // 既定は「直進チャレンジ × MG996R」。scripted=基盤歩容が地形に蹴られ斜行 → RL ボタンで汎用方策が
 // +x へ操舵し直す様子（基盤 555cm → RL 839cm/+51%）を見せる。コースを切り替えても同じ汎用方策が再生される。
 let mechId = UI_MECHANISMS[0].id;
-let courseId: CourseId = 'challenge';
+let courseId: CourseId = 'room-obs';
 let motorId = 'mg996r';
 let commandHeadingDeg = 0; // 方策に与える目標方位（操舵）。RL=最近傍の録画方位を再生 / ライブ=連続で即操舵
 let torqueCapNm = getServo(motorId).stallNm;
@@ -239,7 +239,7 @@ function renderStats(rows: StatRow[]): void {
 /** RL 成果物を照合するコース名。コース対応機構なら選択中のコース、非対応なら平地。 */
 function effectiveCourse(): string {
   const mech = getMechanism(mechId);
-  return mech.supportsCourse ? courseId : 'flat';
+  return mech.supportsCourse ? courseId : 'room';
 }
 
 /** 現在の 機構×コース×モーター に対応する RL 方策（記録リプレイ）を全方位ぶん集める。 */
@@ -273,7 +273,7 @@ async function loadPolicyReplay(entry: PolicyManifestEntry): Promise<PolicyRepla
  * 部屋ナビは room 専用方策、それ以外はコース汎用方策。manifest に該当 policy のエントリがある時だけ返す。
  */
 function livePolicyStem(): string | null {
-  const policyTag = effectiveCourse() === 'room' ? 'room' : 'general';
+  const policyTag = isRoomCourse(effectiveCourse()) ? 'room' : 'general';
   const ok = policyManifest.some(
     (e) => e.mechanism === mechId && e.motor === motorId && e.policy === policyTag,
   );
@@ -294,7 +294,7 @@ async function loadPolicyWeights(stem: string): Promise<PolicyWeightsFile> {
 /** 目標方位スライダーをモード×コースに合わせて構成（RL=録画方位に量子化 / ライブ=連続）。 */
 function syncHeadingSlider(): void {
   // 部屋ナビは ±90°（曲がれる範囲）。+x コースは ±25/30°。
-  const room = effectiveCourse() === 'room';
+  const room = isRoomCourse(effectiveCourse());
   if (motionMode === 'live') {
     // ライブは連続操舵。スライダーを動かすと即座に方位指令が変わる。
     const max = room ? 90 : 30;
@@ -581,7 +581,7 @@ async function startLive(): Promise<void> {
 
   // 学習時と同じモーター設定（stiffness/damping は固定、cap はサーボの stall）で env を作る。
   const servo = getServo(motorId);
-  const room = effectiveCourse() === 'room';
+  const room = isRoomCourse(effectiveCourse());
   const terrain = COURSES[effectiveCourse() as CourseId]();
   const motor = { stiffness: 3, damping: 0.15, maxTorqueNm: servo.stallNm };
   const cfg = room
