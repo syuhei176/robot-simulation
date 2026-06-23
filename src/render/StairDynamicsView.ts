@@ -115,7 +115,9 @@ export class StairDynamicsView {
   ): void {
     this.snake3dTerrain.clear();
     for (const b of boxes) {
-      const dispHalfY = Math.min(b.halfY, 0.45); // 物理の全幅壁は描画では障害物幅に詰める
+      // +x コースの全幅床箱(halfY=3)は描画では障害物幅に詰める。部屋ナビの背の高い壁(halfZ>0.1)は
+      // 部屋枠として全長表示する（前/後ろ壁が Y 方向に潰れないように）。
+      const dispHalfY = b.halfZ > 0.1 ? b.halfY : Math.min(b.halfY, 0.45);
       const geom = new THREE.BoxGeometry(b.halfX * 2, dispHalfY * 2, b.halfZ * 2);
       const isOverhang = b.cz - b.halfZ > 0.12; // テーブル天板（頭上の張り出し）
       const mesh = new THREE.Mesh(

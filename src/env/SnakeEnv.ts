@@ -21,6 +21,9 @@ import {
   expandAxes,
   snakeTerrainTopAt,
   makeProgressionTerrain,
+  makeRoomWalls,
+  roomTargetWall,
+  distToRoomWall,
   DEFAULT_SNAKE3D_CONFIG,
   type Snake3DConfig,
   type JointAxis,
@@ -28,6 +31,7 @@ import {
   type Snake3DReplay,
   type SnakeFrame,
   type SnakeTerrainBox,
+  type RoomWall,
 } from '../sim3d/snake3d-dynamics.ts';
 import type { RLEnv, StepResult } from '../rl/RLEnv.ts';
 
@@ -44,6 +48,18 @@ export interface SnakeEnvConfig {
   //（関節残差 ±maxJointDelta では操舵に必要な ~0.2rad を出すとうねりの余地が無くなるため、操舵は専用次元に分離）。
   steerActionScale: number;
   headingMaxRad: number; // 目標ヘディングのランダム化範囲 ±[rad]（操舵の学習。0 なら常に直進=+x）
+  // reset で θ=0（まっすぐ）を選ぶ確率（残りは ±headingMaxRad 一様）。部屋ナビは 0.3。+x コースは 0。
+  straightProb: number;
+  // 部屋ナビ課題（S17）のゴール設定。指定すると報酬は「目標壁への接近」＋到達ボーナス＋時間罰になり、
+  // 目標壁に COM が wallMargin 以内まで来たら done。未指定なら従来の +x コース報酬（forward-along-cmdDir）。
+  goal?: {
+    wallMargin: number; // 目標壁の内面からこの距離 [m] 以内で到達(done)
+    bonus: number; // 到達ボーナス
+    timePenalty: number; // 毎ステップの時間罰（素早い到達を促す）
+  };
+  // 特権観測（教師-生徒蒸留の教師用）。true だと sensor 56 次元の後ろに [ゴール方位 sin/cos, 壁距離/6] を
+  // 足す（goalMode 必須）。先頭 56 次元はセンサーのみ生徒の観測と完全一致＝obs[:56] をそのまま生徒入力に使える。
+  privilegedObs?: boolean;
   headYawEmaTau: number; // 頭IMU yaw の EMA フィルタ時定数 [s]（うねりの振動を均して走行方位を推定）
   forwardReward: number; // 指令方向への前進量への係数
   lateralPenalty: number; // 指令方向に対する横速度 |⊥Δ| への係数（大 veer の矯正）
@@ -80,6 +96,7 @@ export function defaultSnakeEnvConfig(overrides: Partial<Snake3DConfig> = {}): S
     // 余裕を持って ±0.3rad を上限に与え、方策は前進報酬とのトレードオフで必要なぶんだけ使う（直進時は ~0）。
     steerActionScale: 0.3,
     headingMaxRad: 0.5236, // ±30°。エピソード毎に目標方位を一様サンプル（θ≈0 も含み「直進時は操舵しない」を学ぶ）
+    straightProb: 0, // +x コースは一様サンプルのまま（部屋ナビのみ θ=0 を明示的に混ぜる）
     headYawEmaTau: 0.6, // ≈半歩容周期。頭yawはうねりで±30°超振れるので均して平均方位を取り出す
     forwardReward: 20,
     // **大veer の矯正**: per-step の指令直交速度 |⊥Δ| への強い罰。ドリフト「率」を罰するので大きく逸れた時の
@@ -93,6 +110,31 @@ export function defaultSnakeEnvConfig(overrides: Partial<Snake3DConfig> = {}): S
     energyPenalty: 0.002,
     satPenalty: 0.05,
     aliveBonus: 0.01,
+  };
+}
+
+/**
+ * 部屋ナビ課題（S17）の env 設定。6×6 の壁囲い部屋で θ 方向のゴール壁へ向かう。
+ * - 操舵レンジをクリーン領域に収める（steerActionScale 0.06＝プローブ実測 [0,0.08] が単調・側壁到達可）。
+ * - 報酬は「目標壁への接近」＋到達ボーナス＋時間罰（横ずれ/中心線罰は弧での旋回を阻害するので 0）。
+ * 既定地形は壁のみ（評価・録画用のクリーンな部屋）。学習は呼び出し側で terrainBank = makeRoomBank() を入れる。
+ */
+export function roomSnakeEnvConfig(overrides: Partial<Snake3DConfig> = {}): SnakeEnvConfig {
+  const base = defaultSnakeEnvConfig(overrides);
+  return {
+    ...base,
+    sim: { ...base.sim, terrain: overrides.terrain ?? makeRoomWalls() },
+    episodeSteps: 1800, // 基盤 ~9.4m/1800step。前壁 6m・側壁 3m に弧で届く長さ（到達で早期終了）
+    steerActionScale: 0.06,
+    headingMaxRad: Math.PI / 2, // ±90°（プローブで到達可と確認）
+    straightProb: 0.3,
+    forwardReward: 20, // 目標壁への接近量 [m] への係数
+    lateralPenalty: 0, // 旋回（弧）を阻害しないため横ずれ速度罰は使わない
+    centerlinePenalty: 0, // 同上（中心線＝直進前提の罰は部屋ナビでは外す）
+    aliveBonus: 0, // 長居して alive を稼ぐ局所最適を避ける（time penalty で素早い到達を促す）
+    // wallMargin は体半長（segLen·n/2 ≈ 0.56m）より大きく取る: 蛇が壁に頭から到達しても COM は体中央＝
+    // 壁から ~0.5m 後ろに残るため、0.4m では到達ボーナスが永久に発火せず旋回の完了信号が入らない。
+    goal: { wallMargin: 0.6, bonus: 40, timePenalty: 0.02 },
   };
 }
 
@@ -168,6 +210,15 @@ export class SnakeEnv implements RLEnv {
   private yawEmaSin = 0;
   private prevHeadQuat: Quat = [0, 0, 0, 1]; // ジャイロ（角速度）算出用の前ステップ頭姿勢
 
+  // 部屋ナビ課題（cfg.goal 指定時）。reset で θ から目標壁を決め、step で接近を報酬化・到達で done。
+  private readonly goalMode: boolean;
+  private readonly privilegedObs: boolean;
+  private targetWall: RoomWall = 'front';
+  private goalCx = 0; // ゴールパッチ中心（θ光線∩壁）。特権観測の方位算出に使う
+  private goalCy = 0;
+  private prevGoalDist = 0; // 前ステップの目標壁までの距離（接近量の差分報酬用）
+  private reachedGoal = false;
+
   // 記録（決定論ロールアウト → ダッシュボード再生用）。
   private recording = false;
   private recordEvery = 2;
@@ -179,6 +230,8 @@ export class SnakeEnv implements RLEnv {
   private constructor(mj: MujocoModule, cfg: SnakeEnvConfig) {
     this.mj = mj;
     this.cfg = cfg;
+    this.goalMode = cfg.goal !== undefined;
+    this.privilegedObs = cfg.privilegedObs === true && this.goalMode;
     this.sim = cfg.sim;
     this.n = this.sim.n;
     this.nJoints = this.n - 1;
@@ -208,7 +261,8 @@ export class SnakeEnv implements RLEnv {
     this.actDim = this.nJoints + 1;
     // 観測（実機相当）: 関節角(nJoints)+関節速度(nJoints)+関節負荷(nJoints)
     //   +頭IMU姿勢[fwd xy, pitch, roll](4)+頭IMUジャイロ(3)+位相(2)+目標ヘディング誤差 sin/cos(2)。
-    this.obsDim = 3 * this.nJoints + 11;
+    //   特権観測（教師用）なら末尾に [ゴール方位 sin/cos, 壁距離/6](3) を追加。
+    this.obsDim = 3 * this.nJoints + 11 + (this.privilegedObs ? 3 : 0);
     this.obs = new Float32Array(this.obsDim);
     this.residual = new Float64Array(this.nJoints);
     this.jointTau = new Float64Array(this.nJoints);
@@ -244,6 +298,16 @@ export class SnakeEnv implements RLEnv {
   /** 各リンクのカプセル寸法（ライブ描画でビューを組むのに使う）。 */
   getLayout(): SnakeBodyLayout[] {
     return this.layout;
+  }
+
+  /** 開始時の COM（俯瞰SVG・ゴール幾何の基準）。 */
+  get startCom(): [number, number] {
+    return [this.startComX, this.startComY];
+  }
+
+  /** このエピソードで使用中の地形（俯瞰SVG で部屋枠・障害物を描く）。 */
+  getActiveTerrain(): SnakeTerrainBox[] {
+    return this.activeTerrain;
   }
 
   /** 現在の各リンク姿勢（ライブ描画用・`SnakeFrame['bodies']` と同形）。 */
@@ -307,11 +371,14 @@ export class SnakeEnv implements RLEnv {
     this.data = new this.mj.MjData(this.model);
     this.mj.mj_forward(this.model, this.data);
 
-    // 目標ヘディング指令（相対方位）。0=+x。±headingMaxRad の一様サンプル（forceHeadingRad で固定）。
+    // 目標ヘディング指令（相対方位）。0=+x。forceHeadingRad で固定、なければ straightProb で θ=0 を混ぜ、
+    // 残りは ±headingMaxRad 一様サンプル（操舵の学習。θ≈0 を混ぜて「直進時は操舵しない」も学ぶ）。
     this.cmdHeadingRad =
       forceHeadingRad !== undefined
         ? forceHeadingRad
-        : (Math.random() * 2 - 1) * this.cfg.headingMaxRad;
+        : Math.random() < this.cfg.straightProb
+          ? 0
+          : (Math.random() * 2 - 1) * this.cfg.headingMaxRad;
     this.cmdDirX = Math.cos(this.cmdHeadingRad);
     this.cmdDirY = Math.sin(this.cmdHeadingRad);
 
@@ -327,6 +394,17 @@ export class SnakeEnv implements RLEnv {
     this.startComY = cy;
     this.prevComX = cx;
     this.prevComY = cy;
+
+    // 部屋ナビ: θ から目標壁・ゴールパッチ中心を決め、開始距離を保持（接近量の差分報酬の基準）。
+    this.reachedGoal = false;
+    if (this.goalMode) {
+      const g = roomTargetWall(cx, cy, this.cmdHeadingRad);
+      this.targetWall = g.wall;
+      this.goalCx = g.cx;
+      this.goalCy = g.cy;
+      this.prevGoalDist = distToRoomWall(this.targetWall, cx, cy);
+    }
+
     this.simSubstep = 0;
     this.stepCount = 0;
     this.residual.fill(0);
@@ -360,6 +438,7 @@ export class SnakeEnv implements RLEnv {
     const dy = cy - this.startComY; // 開始からの正味変位
     const travelM = Math.hypot(dx, dy);
     const forwardProj = dx * this.cmdDirX + dy * this.cmdDirY; // 指令方向への正味前進
+    const goalDistM = this.goalMode ? distToRoomWall(this.targetWall, cx, cy) : undefined;
     return {
       layout: this.layout,
       frames: this.frames,
@@ -376,7 +455,10 @@ export class SnakeEnv implements RLEnv {
         maxDemandNm: this.epMaxDemand,
         maxAppliedNm: this.epMaxApplied,
         saturatedSteps: this.epSatSteps,
-        success: forwardProj > this.sim.segLen * this.n * 0.5,
+        // 部屋ナビはゴール壁到達で成功。+x コースは指令方向への正味前進で判定（従来）。
+        success: this.goalMode ? this.reachedGoal : forwardProj > this.sim.segLen * this.n * 0.5,
+        reached: this.goalMode ? this.reachedGoal : undefined,
+        goalDistM,
       },
     };
   }
@@ -476,14 +558,12 @@ export class SnakeEnv implements RLEnv {
       }
     }
 
-    // --- 報酬（指令方向 cmdDir の座標系で評価） ---
+    // --- 報酬 ---
     const [cx, cy] = this.com();
     const dx = cx - this.prevComX;
     const dy = cy - this.prevComY;
     this.prevComX = cx;
     this.prevComY = cy;
-    const forwardProj = dx * this.cmdDirX + dy * this.cmdDirY; // 指令方向への前進
-    const lateralProj = -dx * this.cmdDirY + dy * this.cmdDirX; // 指令直交（横ずれ速度）
 
     // エネルギー罰は関節残差のみ（操舵行動は罰さない＝曲がることをコストにしない）。
     let energy = 0;
@@ -493,24 +573,45 @@ export class SnakeEnv implements RLEnv {
     }
     energy /= this.nJoints;
     const satFrac = satSamples > 0 ? satCount / satSamples : 0;
-
-    // 指令光線（開始点を通る方位線）からの横ずれ＝追従誤差の積分。上限付き（暴走防止）。
-    const ox = cx - this.startComX;
-    const oy = cy - this.startComY;
-    const crossOffset = -ox * this.cmdDirY + oy * this.cmdDirX;
-    const offMag = Math.min(Math.abs(crossOffset), this.cfg.centerlineCap);
     const blewUp = !Number.isFinite(cx) || !Number.isFinite(cy) || Math.abs(cx) > 50;
-    let reward =
-      this.cfg.forwardReward * forwardProj -
-      this.cfg.lateralPenalty * Math.abs(lateralProj) -
-      this.cfg.centerlinePenalty * offMag -
-      this.cfg.energyPenalty * energy -
-      this.cfg.satPenalty * satFrac +
-      this.cfg.aliveBonus;
+
+    let reward: number;
+    let arrived = false;
+    if (this.goalMode && this.cfg.goal) {
+      // 部屋ナビ: 目標壁への接近（差分＝弧でも正の勾配）− 時間罰 − エネルギー/飽和。到達でボーナス＋done。
+      const goalDist = distToRoomWall(this.targetWall, cx, cy);
+      const approach = this.prevGoalDist - goalDist; // 接近すると正
+      this.prevGoalDist = goalDist;
+      reward =
+        this.cfg.forwardReward * approach -
+        this.cfg.goal.timePenalty -
+        this.cfg.energyPenalty * energy -
+        this.cfg.satPenalty * satFrac;
+      arrived = goalDist < this.cfg.goal.wallMargin;
+      if (arrived) {
+        reward += this.cfg.goal.bonus;
+        this.reachedGoal = true;
+      }
+    } else {
+      // +x コース（従来）: 指令方向 cmdDir の座標系で前進 − 横ずれ − 中心線 − エネルギー/飽和 ＋ 生存。
+      const forwardProj = dx * this.cmdDirX + dy * this.cmdDirY;
+      const lateralProj = -dx * this.cmdDirY + dy * this.cmdDirX;
+      const ox = cx - this.startComX;
+      const oy = cy - this.startComY;
+      const crossOffset = -ox * this.cmdDirY + oy * this.cmdDirX;
+      const offMag = Math.min(Math.abs(crossOffset), this.cfg.centerlineCap);
+      reward =
+        this.cfg.forwardReward * forwardProj -
+        this.cfg.lateralPenalty * Math.abs(lateralProj) -
+        this.cfg.centerlinePenalty * offMag -
+        this.cfg.energyPenalty * energy -
+        this.cfg.satPenalty * satFrac +
+        this.cfg.aliveBonus;
+    }
     if (blewUp) reward -= 5;
 
     this.stepCount++;
-    const done = blewUp || this.stepCount >= this.cfg.episodeSteps;
+    const done = blewUp || arrived || this.stepCount >= this.cfg.episodeSteps;
 
     if (this.recording) {
       const saturated = satCount > 0;
@@ -532,7 +633,8 @@ export class SnakeEnv implements RLEnv {
           t: this.simSubstep * this.physicsDt,
           bodies,
           diag: {
-            travelM: Math.hypot(ox, oy), // 開始からの総移動距離（向きに依らない）
+            // 開始からの総移動距離（向きに依らない）。
+            travelM: Math.hypot(cx - this.startComX, cy - this.startComY),
             demandNm: stepDemand,
             appliedNm: stepApplied,
             saturated,
@@ -587,6 +689,16 @@ export class SnakeEnv implements RLEnv {
     const headErr = this.cmdHeadingRad - yawFilt;
     o[k++] = Math.sin(headErr);
     o[k++] = Math.cos(headErr);
+
+    // 特権観測（教師用・末尾3次元）: ゴールパッチ中心への真の方位（体前方基準 sin/cos）＋目標壁までの距離/6。
+    // localization 込みの「どっちへ・あとどれだけ」で操舵が自明になる（生徒はこれ無しでセンサーから模倣する）。
+    if (this.privilegedObs) {
+      const [cx, cy] = this.com();
+      const bearing = Math.atan2(this.goalCy - cy, this.goalCx - cx) - yawNow;
+      o[k++] = Math.sin(bearing);
+      o[k++] = Math.cos(bearing);
+      o[k++] = distToRoomWall(this.targetWall, cx, cy) / 6;
+    }
 
     for (let i = 0; i < this.obsDim; i++) if (!Number.isFinite(o[i])) o[i] = 0;
     return o;

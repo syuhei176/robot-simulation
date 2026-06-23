@@ -166,6 +166,138 @@ export function makeCourseBank(nRandom = 9, rng: () => number = Math.random): Sn
   return bank;
 }
 
+// ============================================================================
+// 部屋ナビ課題（S17）— 四方を越えられない壁で囲った 6×6m の部屋。蛇は後ろ壁際で内向き(+x)に生成され、
+// 目標方位 θ の壁際ゴールへ向かう。ゴール到達は env 側の特権（絶対位置）で判定する。
+// ============================================================================
+
+/** 部屋の幾何（壁の内面位置・高さ）。env / 地形生成 / 俯瞰SVG の単一ソース。 */
+export const ROOM = {
+  backX: -0.12, // 後ろ壁の中心 x（内面 = backX + wallThick = -0.07、尾カプセル端 x≈-0.02 に被らない）
+  frontX: 6.0, // 前壁の内面 x
+  halfY: 3.0, // 左右壁の内面 |y|
+  wallThick: 0.05, // 壁の厚さ方向 half（薄壁＝牽引ゲートを壊さない）
+  wallHalfZ: 0.18, // 壁の高さ half（36cm＝越えられない）
+} as const;
+
+export type RoomWall = 'front' | 'left' | 'right';
+
+/** 部屋の四方の壁（越えられない剛体箱）。薄壁にして `snakeTerrainTopAt` が床リンクの牽引を誤って殺さないようにする。 */
+export function makeRoomWalls(): SnakeTerrainBox[] {
+  const { backX, frontX, halfY, wallThick, wallHalfZ } = ROOM;
+  const midX = (backX + frontX) / 2;
+  const spanXHalf = (frontX - backX) / 2 + wallThick;
+  const t = wallThick;
+  const hz = wallHalfZ;
+  return [
+    { cx: backX, cy: 0, cz: hz, halfX: t, halfY: halfY + t, halfZ: hz }, // 後ろ壁
+    { cx: frontX + t, cy: 0, cz: hz, halfX: t, halfY: halfY + t, halfZ: hz }, // 前壁（内面 x=frontX）
+    { cx: midX, cy: halfY + t, cz: hz, halfX: spanXHalf, halfY: t, halfZ: hz }, // 左壁（内面 y=+halfY）
+    { cx: midX, cy: -(halfY + t), cz: hz, halfX: spanXHalf, halfY: t, halfZ: hz }, // 右壁（内面 y=-halfY）
+  ];
+}
+
+/**
+ * 部屋内部の小障害物 2-3 個（小 footprint・低め＝乗り越えず回避する高さ）。スポーン回廊(x<1.4)・互いの重なりを除外。
+ * halfY を小さく取るのが必須（全幅だと同じx帯の床リンクの牽引が `groundGate` 判定で誤って切れる）。
+ */
+export function makeRoomObstacles(rng: () => number = Math.random): SnakeTerrainBox[] {
+  const { frontX, halfY } = ROOM;
+  const n = 2 + Math.floor(rng() * 2); // 2 or 3
+  const obs: SnakeTerrainBox[] = [];
+  for (let tries = 0; obs.length < n && tries < 200; tries++) {
+    const halfX = 0.15 + rng() * 0.1;
+    const hy = 0.15 + rng() * 0.1;
+    const halfZ = 0.025 + rng() * 0.01; // 5-7cm＝基盤は登れず回避する
+    const cx = 1.6 + rng() * (frontX - 1.0 - 1.6); // x ∈ [1.6, 5.0]
+    const cy = (rng() * 2 - 1) * (halfY - 0.6); // y ∈ [-2.4, 2.4]
+    if (cx - halfX < 1.4) continue; // スポーン回廊を空ける
+    let ok = true;
+    for (const b of obs) {
+      if (Math.abs(cx - b.cx) < halfX + b.halfX + 0.4 && Math.abs(cy - b.cy) < hy + b.halfY + 0.4) {
+        ok = false;
+        break;
+      }
+    }
+    if (!ok) continue;
+    obs.push({ cx, cy, cz: halfZ, halfX, halfY: hy, halfZ });
+  }
+  return obs;
+}
+
+/** 部屋1つ（壁＋ランダム障害物）。 */
+export function makeRoomCourse(rng: () => number = Math.random): SnakeTerrainBox[] {
+  return [...makeRoomWalls(), ...makeRoomObstacles(rng)];
+}
+
+/**
+ * 部屋のドメインランダム化バンク。先頭 3 個は障害物なし（クリーンな旋回学習）＋残りはランダム障害物配置。
+ * SnakeEnv は地形ごとに MuJoCo モデルを1つコンパイルして保持するので、nLayouts ぶんのモデルを持つ。
+ */
+export function makeRoomBank(nLayouts = 12, rng: () => number = Math.random): SnakeTerrainBox[][] {
+  const walls = makeRoomWalls();
+  const bank: SnakeTerrainBox[][] = [];
+  for (let i = 0; i < nLayouts; i++) {
+    bank.push(i < 3 ? walls.slice() : [...walls, ...makeRoomObstacles(rng)]);
+  }
+  return bank;
+}
+
+/**
+ * スタート (sx,sy) から方位 θ の光線が最初に当たる部屋の壁（前/左/右）と交点を返す。
+ * ゴールパッチの中心（俯瞰描画用）＝この交点。到達判定は「目標壁までの距離 < margin」で行う（壁際ならどこでも可＝弧で届く緩い定義）。
+ */
+export function roomTargetWall(
+  sx: number,
+  sy: number,
+  theta: number,
+): { wall: RoomWall; cx: number; cy: number } {
+  const dx = Math.cos(theta);
+  const dy = Math.sin(theta);
+  const { frontX, halfY } = ROOM;
+  let best = Infinity;
+  let wall: RoomWall = 'front';
+  let ix: number = frontX;
+  let iy: number = sy;
+  if (dx > 1e-6) {
+    const t = (frontX - sx) / dx;
+    const y = sy + dy * t;
+    if (t > 0 && Math.abs(y) <= halfY && t < best) {
+      best = t;
+      wall = 'front';
+      ix = frontX;
+      iy = y;
+    }
+  }
+  if (dy > 1e-6) {
+    const t = (halfY - sy) / dy;
+    const x = sx + dx * t;
+    if (t > 0 && x >= 0 && x <= frontX && t < best) {
+      best = t;
+      wall = 'left';
+      ix = x;
+      iy = halfY;
+    }
+  } else if (dy < -1e-6) {
+    const t = (-halfY - sy) / dy;
+    const x = sx + dx * t;
+    if (t > 0 && x >= 0 && x <= frontX && t < best) {
+      best = t;
+      wall = 'right';
+      ix = x;
+      iy = -halfY;
+    }
+  }
+  return { wall, cx: ix, cy: iy };
+}
+
+/** COM(cx,cy) から目標壁の内面までの垂直距離（接近すると 0 に近づく）。報酬整形と到達判定に使う。 */
+export function distToRoomWall(wall: RoomWall, cx: number, cy: number): number {
+  if (wall === 'front') return ROOM.frontX - cx;
+  if (wall === 'left') return ROOM.halfY - cy;
+  return cy + ROOM.halfY; // right wall (y = -halfY)
+}
+
 export interface Snake3DConfig {
   // ---- 関節構成（JointSpec） ----
   pattern: AxisPattern;
@@ -253,6 +385,8 @@ export interface Snake3DSummary {
   maxAppliedNm: number;
   saturatedSteps: number;
   success: boolean;
+  reached?: boolean; // 部屋ナビ課題でゴール壁に到達したか（+x コースでは未使用）
+  goalDistM?: number; // 部屋ナビ課題でエピソード終端の目標壁までの距離 [m]
 }
 
 export interface Snake3DReplay {

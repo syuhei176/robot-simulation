@@ -14,9 +14,11 @@ import { getServo } from '../src/sim3d/servos.ts';
 import {
   makeProgressionTerrain,
   makeStraightChallengeTerrain,
+  makeRoomWalls,
+  roomTargetWall,
   type SnakeTerrainBox,
 } from '../src/sim3d/snake3d-dynamics.ts';
-import { SnakeEnv, defaultSnakeEnvConfig } from '../src/env/SnakeEnv.ts';
+import { SnakeEnv, defaultSnakeEnvConfig, roomSnakeEnvConfig } from '../src/env/SnakeEnv.ts';
 import { Policy } from '../src/rl/Policy.ts';
 
 /** 検証に使う名前付きコース（汎用性を見るため複数で評価する）。 */
@@ -26,6 +28,7 @@ const NAMED_COURSES: Record<string, () => SnakeTerrainBox[]> = {
   challenge: makeStraightChallengeTerrain,
 };
 const EVAL_HEADINGS_DEG = [-25, 0, 25] as const;
+const ROOM_EVAL_HEADINGS_DEG = [-90, -45, 0, 45, 90] as const;
 const DEG = Math.PI / 180;
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -43,6 +46,8 @@ interface RolloutResult {
   forwardM: number;
   crossM: number;
   achievedDeg: number;
+  reached: boolean;
+  goalDistM: number;
 }
 
 function rollout(
@@ -58,11 +63,14 @@ function rollout(
     obs = r.obs;
     done = r.done;
   }
-  const [dx, dy] = env.getReplay().summary.netDispM;
+  const summary = env.getReplay().summary;
+  const [dx, dy] = summary.netDispM;
   return {
     forwardM: env.progressMetric() - startProj,
     crossM: Math.abs(-dx * Math.sin(headingRad) + dy * Math.cos(headingRad)),
     achievedDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
+    reached: summary.reached ?? false,
+    goalDistM: summary.goalDistM ?? 0,
   };
 }
 
@@ -84,6 +92,32 @@ async function main(): Promise<void> {
   const zeros = new Float32Array(file.actDim);
 
   console.log(`=== 検証: ${stem} === 学習コース=${file.course} / モーター=${servo.name}`);
+
+  if (file.course === 'room') {
+    // 部屋ナビ: 壁のみのクリーンな部屋で θ ごとに「到達・残距離・達成方位・再現性」を基盤と比較。
+    console.log(`  部屋ナビ（壁のみ）で各方位の到達・残距離・達成方位・再現性を基盤(残差0)と比較:`);
+    const envCfg = roomSnakeEnvConfig({
+      terrain: makeRoomWalls(),
+      motor: { stiffness: 3, damping: 0.15, maxTorqueNm: servo.stallNm },
+    });
+    const env = await SnakeEnv.create(envCfg);
+    for (const deg of ROOM_EVAL_HEADINGS_DEG) {
+      const rad = deg * DEG;
+      const r1 = rollout(env, rad, (o) => policy.actMean(o));
+      const r2 = rollout(env, rad, (o) => policy.actMean(o));
+      const base = rollout(env, rad, () => zeros);
+      const repro = Math.abs(r1.goalDistM - r2.goalDistM) < 1e-6 ? 'OK' : '不一致';
+      const wall = roomTargetWall(env.startCom[0], env.startCom[1], rad).wall;
+      console.log(
+        `  [指令${String(deg).padStart(3)}°→${wall.padEnd(5)}] 基盤 ${base.reached ? '到達' : '未到達'}(残${(base.goalDistM * 100).toFixed(0)}cm) → ` +
+          `RL ${r1.reached ? '到達✓' : '未到達'}(残${(r1.goalDistM * 100).toFixed(0)}cm) 達成方位${r1.achievedDeg.toFixed(0)}°（再現${repro}）`,
+      );
+    }
+    env.dispose();
+    policy.dispose();
+    return;
+  }
+
   console.log(`  各コース×方位で「指令方向前進・達成方位の追従・再現性」を基盤(残差0)と比較:`);
 
   for (const [name, makeTerrain] of Object.entries(NAMED_COURSES)) {

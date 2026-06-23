@@ -22,11 +22,20 @@ import {
   makeProgressionTerrain,
   makeStraightChallengeTerrain,
   makeCourseBank,
+  makeRoomBank,
+  makeRoomWalls,
+  roomTargetWall,
   type SnakeTerrainBox,
 } from '../src/sim3d/snake3d-dynamics.ts';
-import { SnakeEnv, defaultSnakeEnvConfig } from '../src/env/SnakeEnv.ts';
+import {
+  SnakeEnv,
+  defaultSnakeEnvConfig,
+  roomSnakeEnvConfig,
+  type SnakeEnvConfig,
+} from '../src/env/SnakeEnv.ts';
 import { Policy } from '../src/rl/Policy.ts';
 import { PPO, DEFAULT_PPO } from '../src/rl/PPO.ts';
+import { writeRoomTraceSvg } from './room-trace.ts';
 
 // 探索 std のアニーリング: 前半は探索を保ち、後半で縮小して決定論（mean）に性能を担わせる。
 const LOGSTD_START = -0.9; // std≈0.41
@@ -36,8 +45,10 @@ function annealLogStd(i: number, iters: number): number {
   return LOGSTD_START + (LOGSTD_END - LOGSTD_START) * frac;
 }
 
-/** 評価・録画に使う離散方位 [deg]（操舵を確認できる左/直進/右）。 */
+/** 評価・録画に使う離散方位 [deg]（操舵を確認できる左/直進/右）。+x コース用。 */
 const EVAL_HEADINGS_DEG = [-25, 0, 25] as const;
+/** 部屋ナビ課題の評価方位 [deg]（±90° まで・曲がれる範囲）。 */
+const ROOM_EVAL_HEADINGS_DEG = [-90, -45, 0, 45, 90] as const;
 const DEG = Math.PI / 180;
 
 /** 録画ファイル名の方位タグ（h0 / hp25 / hm25）。 */
@@ -60,7 +71,7 @@ interface Options {
   iters: number;
   rollout: number;
   motor: string;
-  course: 'progression' | 'flat' | 'challenge' | 'general';
+  course: 'progression' | 'flat' | 'challenge' | 'general' | 'room';
   episodeSteps: number;
   hidden: number;
   lr: number;
@@ -129,6 +140,8 @@ interface EvalResult {
   achievedDeg: number; // 達成方位 [deg]
   steps: number;
   fell: boolean;
+  reached: boolean; // 部屋ナビ: ゴール壁に到達したか
+  goalDistM: number; // 部屋ナビ: 終端の目標壁までの距離 [m]
 }
 
 /** 指令方位 headingRad で決定論（平均行動）ロールアウト。record でフレーム記録。 */
@@ -138,15 +151,16 @@ function evaluate(env: SnakeEnv, policy: Policy, headingRad: number, record = fa
   const startProj = env.progressMetric();
   let steps = 0;
   let done = false;
-  let fell = false;
   while (!done) {
     const r = env.step(policy.actMean(obs));
     obs = r.obs;
     done = r.done;
     steps++;
-    if (done && steps < env.maxSteps) fell = true; // 早期終了＝数値破綻
   }
-  const [dx, dy] = env.getReplay().summary.netDispM;
+  const summary = env.getReplay().summary;
+  // 早期終了＝数値破綻。ただしゴール到達による早期 done は破綻ではない（部屋ナビ）。
+  const fell = done && steps < env.maxSteps && !(summary.reached ?? false);
+  const [dx, dy] = summary.netDispM;
   const crossM = Math.abs(-dx * Math.sin(headingRad) + dy * Math.cos(headingRad));
   return {
     forwardM: env.progressMetric() - startProj,
@@ -154,6 +168,8 @@ function evaluate(env: SnakeEnv, policy: Policy, headingRad: number, record = fa
     achievedDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
     steps,
     fell,
+    reached: summary.reached ?? false,
+    goalDistM: summary.goalDistM ?? 0,
   };
 }
 
@@ -163,38 +179,58 @@ function evaluateBase(env: SnakeEnv, headingRad: number): EvalResult {
   const startProj = env.progressMetric();
   const zeros = new Float32Array(env.actDim);
   let done = false;
-  while (!done) done = env.step(zeros).done;
-  const [dx, dy] = env.getReplay().summary.netDispM;
+  let steps = 0;
+  while (!done) {
+    done = env.step(zeros).done;
+    steps++;
+  }
+  const summary = env.getReplay().summary;
+  const [dx, dy] = summary.netDispM;
   const crossM = Math.abs(-dx * Math.sin(headingRad) + dy * Math.cos(headingRad));
   return {
     forwardM: env.progressMetric() - startProj,
     crossM,
     achievedDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
-    steps: env.maxSteps,
+    steps,
     fell: false,
+    reached: summary.reached ?? false,
+    goalDistM: summary.goalDistM ?? 0,
   };
 }
 
 const round5 = (_k: string, v: unknown): unknown =>
   typeof v === 'number' ? Number(v.toFixed(5)) : v;
 
-/** 各コース×離散方位で eval 平均の選択スコア（前進が高く・横ずれが小さいほど良い）。 */
+/**
+ * 各コース×離散方位で eval 平均の選択スコア。
+ * 部屋ナビ: 到達=+2・目標壁までの距離を減点（到達率優先）。+x コース: 前進 − 追従誤差。
+ */
 function selectionScore(
   evalEnvs: Array<{ name: string; env: SnakeEnv }>,
   policy: Policy,
+  headingsDeg: readonly number[],
+  room: boolean,
 ): { score: number; note: string } {
   let sum = 0;
   let count = 0;
+  let reachedCount = 0;
   const parts: string[] = [];
   for (const e of evalEnvs) {
-    for (const deg of EVAL_HEADINGS_DEG) {
+    for (const deg of headingsDeg) {
       const r = evaluate(e.env, policy, deg * DEG);
-      const v = r.fell ? -1 : r.forwardM - r.crossM; // 前進 − 追従誤差。破綻は強く減点
+      let v: number;
+      if (room) {
+        v = r.fell ? -1 : (r.reached ? 2 : 0) - r.goalDistM / 3; // 到達優先＋残距離を減点
+        if (r.reached) reachedCount++;
+      } else {
+        v = r.fell ? -1 : r.forwardM - r.crossM; // 前進 − 追従誤差。破綻は強く減点
+        if (deg === 0) parts.push(`${e.name}=${(r.forwardM * 100).toFixed(0)}`);
+      }
       sum += v;
       count++;
-      if (deg === 0) parts.push(`${e.name}=${(r.forwardM * 100).toFixed(0)}`);
     }
   }
+  if (room) parts.push(`到達${reachedCount}/${count}`);
   return { score: count > 0 ? sum / count : -Infinity, note: parts.join(' ') };
 }
 
@@ -205,22 +241,40 @@ function recordCourses(
   servo: ReturnType<typeof getServo>,
   totalMass: number,
   policyTag: string,
+  headingsDeg: readonly number[],
+  room: boolean,
 ): void {
   mkdirSync(OUT_DIR, { recursive: true });
   console.log('\n=== 結果（決定論評価・コース×方位） ===');
   for (const e of evalEnvs) {
-    for (const deg of EVAL_HEADINGS_DEG) {
+    for (const deg of headingsDeg) {
       const rad = deg * DEG;
       const base = evaluateBase(e.env, rad);
       const res = evaluate(e.env, policy, rad, true);
       const replay = e.env.getReplay();
-      const gainPct =
-        base.forwardM > 0 ? ((res.forwardM - base.forwardM) / base.forwardM) * 100 : 0;
-      console.log(
-        `  [${e.name.padEnd(11)} ${String(deg).padStart(3)}°] 基盤 ${(base.forwardM * 100).toFixed(0).padStart(4)}cm → ` +
-          `RL ${(res.forwardM * 100).toFixed(0).padStart(4)}cm (${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(0)}%) ` +
-          `達成方位 ${res.achievedDeg.toFixed(0)}° 横ずれ ${(res.crossM * 100).toFixed(0)}cm ${res.fell ? '破綻' : '完走'}`,
-      );
+      if (room) {
+        console.log(
+          `  [${e.name.padEnd(6)} ${String(deg).padStart(3)}°→${roomTargetWall(e.env.startCom[0], e.env.startCom[1], rad).wall.padEnd(5)}] ` +
+            `RL ${res.reached ? '到達✓' : '未到達'} 残距離 ${(res.goalDistM * 100).toFixed(0)}cm 達成方位 ${res.achievedDeg.toFixed(0)}° ` +
+            `(基盤 ${base.reached ? '到達' : '未到達'}) ${res.fell ? '破綻' : ''}`,
+        );
+        writeRoomTraceSvg(
+          join(OUT_DIR, `room-trace-${headTag(deg)}-${servo.id}.svg`),
+          e.env.getActiveTerrain(),
+          e.env.startCom,
+          deg,
+          replay,
+          res.reached,
+        );
+      } else {
+        const gainPct =
+          base.forwardM > 0 ? ((res.forwardM - base.forwardM) / base.forwardM) * 100 : 0;
+        console.log(
+          `  [${e.name.padEnd(11)} ${String(deg).padStart(3)}°] 基盤 ${(base.forwardM * 100).toFixed(0).padStart(4)}cm → ` +
+            `RL ${(res.forwardM * 100).toFixed(0).padStart(4)}cm (${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(0)}%) ` +
+            `達成方位 ${res.achievedDeg.toFixed(0)}° 横ずれ ${(res.crossM * 100).toFixed(0)}cm ${res.fell ? '破綻' : '完走'}`,
+        );
+      }
       const meta = {
         mechanism: 'snake3d',
         course: e.name,
@@ -234,6 +288,8 @@ function recordCourses(
         baseForwardM: round4(base.forwardM),
         achievedDeg: round4(res.achievedDeg),
         crossM: round4(res.crossM),
+        reached: room ? res.reached : undefined,
+        goalDistM: room ? round4(res.goalDistM) : undefined,
         fell: res.fell,
       };
       writeFileSync(
@@ -253,23 +309,38 @@ async function main(): Promise<void> {
   await tf.setBackend('cpu');
   await tf.ready();
 
-  // 訓練 env: general は地形バンク（ドメインランダム化）、単一コースは固定地形。方位は常に毎エピソードランダム化。
-  const trainCfg = defaultSnakeEnvConfig({ motor: motorOverride });
+  const room = opts.course === 'room';
+  const headings = room ? ROOM_EVAL_HEADINGS_DEG : EVAL_HEADINGS_DEG;
+
+  // 訓練 env: room は部屋バンク、general は +x 地形バンク、単一コースは固定地形。方位は毎エピソードランダム化。
+  let trainCfg: SnakeEnvConfig;
+  if (room) {
+    trainCfg = roomSnakeEnvConfig({ motor: motorOverride });
+    trainCfg.terrainBank = makeRoomBank();
+  } else {
+    trainCfg = defaultSnakeEnvConfig({ motor: motorOverride });
+    if (opts.course === 'general') trainCfg.terrainBank = makeCourseBank();
+    else if (opts.course === 'flat') trainCfg.sim.terrain = [];
+    else if (opts.course === 'challenge') trainCfg.sim.terrain = makeStraightChallengeTerrain();
+    // progression は defaultSnakeEnvConfig の既定地形のまま。
+  }
   trainCfg.episodeSteps = opts.episodeSteps;
-  if (opts.course === 'general') trainCfg.terrainBank = makeCourseBank();
-  else if (opts.course === 'flat') trainCfg.sim.terrain = [];
-  else if (opts.course === 'challenge') trainCfg.sim.terrain = makeStraightChallengeTerrain();
-  // progression は defaultSnakeEnvConfig の既定地形のまま。
   const trainEnv = await SnakeEnv.create(trainCfg);
 
-  // 評価 env: 名前付きコースを固定地形で（general は全コース、単一コースはそのコースのみ）。
-  const evalCourseList =
-    opts.course === 'general' ? EVAL_COURSES : EVAL_COURSES.filter((c) => c.name === opts.course);
+  // 評価 env: room は壁のみのクリーンな部屋（決定論）。+x は名前付きコースを固定地形で。
   const evalEnvs: Array<{ name: string; env: SnakeEnv }> = [];
-  for (const c of evalCourseList) {
-    const cfg = defaultSnakeEnvConfig({ terrain: c.terrain(), motor: motorOverride });
+  if (room) {
+    const cfg = roomSnakeEnvConfig({ terrain: makeRoomWalls(), motor: motorOverride });
     cfg.episodeSteps = opts.episodeSteps;
-    evalEnvs.push({ name: c.name, env: await SnakeEnv.create(cfg) });
+    evalEnvs.push({ name: 'room', env: await SnakeEnv.create(cfg) });
+  } else {
+    const evalCourseList =
+      opts.course === 'general' ? EVAL_COURSES : EVAL_COURSES.filter((c) => c.name === opts.course);
+    for (const c of evalCourseList) {
+      const cfg = defaultSnakeEnvConfig({ terrain: c.terrain(), motor: motorOverride });
+      cfg.episodeSteps = opts.episodeSteps;
+      evalEnvs.push({ name: c.name, env: await SnakeEnv.create(cfg) });
+    }
   }
 
   const policy = new Policy(trainEnv.obsDim, trainEnv.actDim, opts.hidden, LOGSTD_START);
@@ -291,7 +362,13 @@ async function main(): Promise<void> {
   // 基盤（残差0）の直進(0°)前進＝目安。
   for (const e of evalEnvs) {
     const b0 = evaluateBase(e.env, 0);
-    console.log(`  基盤(0°) ${e.name}: ${(b0.forwardM * 100).toFixed(0)}cm`);
+    if (room) {
+      console.log(
+        `  基盤(0°) ${e.name}: ${b0.reached ? '到達✓' : '未到達'} 残距離 ${(b0.goalDistM * 100).toFixed(0)}cm`,
+      );
+    } else {
+      console.log(`  基盤(0°) ${e.name}: ${(b0.forwardM * 100).toFixed(0)}cm`);
+    }
   }
 
   const history: Array<{ iter: number; return: number; forwardM: number; std: number }> = [];
@@ -312,7 +389,7 @@ async function main(): Promise<void> {
     }
     let evalNote = '';
     if ((i + 1) % opts.evalEvery === 0 || i === opts.iters - 1) {
-      const { score, note } = selectionScore(evalEnvs, policy);
+      const { score, note } = selectionScore(evalEnvs, policy, headings, room);
       if (score > bestScore) {
         bestScore = score;
         bestWeights = policy.exportWeights();
@@ -329,7 +406,7 @@ async function main(): Promise<void> {
   // ---- ベスト方策で各コース×方位を録画・保存 ----
   policy.importWeights(bestWeights);
   const policyTag = opts.course === 'general' ? 'general' : opts.course;
-  recordCourses(evalEnvs, policy, servo, trainCfg.sim.totalMass, policyTag);
+  recordCourses(evalEnvs, policy, servo, trainCfg.sim.totalMass, policyTag, headings, room);
 
   // 方策の重み（全コース・全方位共通の単一方策）を1ファイルに保存。
   const weightsStem = opts.course === 'general' ? 'snake3d-general' : `snake3d-${opts.course}`;

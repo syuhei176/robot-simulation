@@ -10,3 +10,4 @@ public/policies/*.json
 !public/policies/*.replay.json
 !public/policies/manifest.json
 !public/policies/snake3d-general-mg996r.json
+!public/policies/snake3d-room-mg996r.json

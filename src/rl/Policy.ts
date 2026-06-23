@@ -38,7 +38,8 @@ export class Policy {
 
     this.policyNet = mlp(actDim, 'linear');
     this.valueNet = mlp(1, 'linear');
-    this.logStd = tf.variable(tf.fill([actDim], logStdInit), true, 'logStd');
+    // 名前は指定しない（自動でユニーク化）。複数 Policy（教師-生徒蒸留など）を同時に持つと名前付きだと衝突する。
+    this.logStd = tf.variable(tf.fill([actDim], logStdInit), true);
   }
 
   /** 1 状態から行動をサンプル（学習時のロールアウト収集用）。 */
@@ -66,6 +67,20 @@ export class Policy {
       const mean = this.policyNet.apply(x) as tf.Tensor2D;
       return mean.dataSync() as Float32Array;
     });
+  }
+
+  /**
+   * 教師-生徒蒸留(behavioral cloning): policyNet を「観測→教師の平均行動」の MSE で 1 ステップ最適化する。
+   * value/logStd は触らない（生徒の推論は policyNet=平均行動のみ使う）。返り値は損失値。
+   */
+  bcStep(obs: tf.Tensor2D, target: tf.Tensor2D, optimizer: tf.Optimizer): number {
+    const lossScalar = optimizer.minimize(() => {
+      const pred = this.policyNet.apply(obs) as tf.Tensor2D;
+      return tf.losses.meanSquaredError(target, pred) as tf.Scalar;
+    }, true);
+    const l = lossScalar ? lossScalar.dataSync()[0] : NaN;
+    lossScalar?.dispose();
+    return l;
   }
 
   /** バッチに対する logπ(a|s)、V(s)、エントロピーを返す（minimize 内で使用）。 */

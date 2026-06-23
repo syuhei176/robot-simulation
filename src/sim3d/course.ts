@@ -6,14 +6,16 @@
 import {
   makeProgressionTerrain,
   makeStraightChallengeTerrain,
+  makeRoomWalls,
   type SnakeTerrainBox,
 } from './snake3d-dynamics.ts';
 
-/** コースカタログ（id → 地形を生成する関数）。平地は地形なし＝空配列。 */
+/** コースカタログ（id → 地形を生成する関数）。平地は地形なし＝空配列。room は壁のみのクリーンな部屋。 */
 export const COURSES = {
   flat: (): SnakeTerrainBox[] => [],
   progression: (): SnakeTerrainBox[] => makeProgressionTerrain(),
   challenge: (): SnakeTerrainBox[] => makeStraightChallengeTerrain(),
+  room: (): SnakeTerrainBox[] => makeRoomWalls(),
 } as const;
 
 export type CourseId = keyof typeof COURSES;
@@ -23,4 +25,5 @@ export const COURSE_OPTIONS: Array<{ id: CourseId; label: string }> = [
   { id: 'flat', label: '平地' },
   { id: 'progression', label: '進行性（障害物→階段→テーブル壁）' },
   { id: 'challenge', label: '直進チャレンジ（壁なし長距離）' },
+  { id: 'room', label: '部屋ナビ（6×6m 壁囲い・目標方位へ操舵）' },
 ];

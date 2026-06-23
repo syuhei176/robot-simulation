@@ -10,8 +10,8 @@ import { getServo, SELECTABLE_SERVO_IDS } from './sim3d/servos.ts';
 import { COURSES, COURSE_OPTIONS, type CourseId } from './sim3d/course.ts';
 import { MECHANISMS, getMechanism } from './mech/registry.ts';
 import { recordedSnake3DReplay } from './mech/snake3d.ts';
-import type { Snake3DReplay } from './sim3d/snake3d-dynamics.ts';
-import { SnakeEnv, defaultSnakeEnvConfig } from './env/SnakeEnv.ts';
+import { ROOM, type Snake3DReplay } from './sim3d/snake3d-dynamics.ts';
+import { SnakeEnv, defaultSnakeEnvConfig, roomSnakeEnvConfig } from './env/SnakeEnv.ts';
 import { makePolicyForward } from './rl/policyForward.ts';
 import {
   defaultParamValues,
@@ -66,11 +66,13 @@ interface PolicyManifestEntry {
   mass: number;
   base: string;
   policy?: string; // 学習方策の種別。'general' ならコース汎用の単一重み（ライブ駆動に使える）
-  forwardM: number;
+  forwardM?: number; // +x コースの前進量。部屋ナビでは未使用（reached/goalDistM を使う）
   baseForwardM?: number; // 基盤歩容（残差0）の前進量。あれば「基盤→RL」の上乗せを表示する
   cmdHeadingDeg?: number; // 目標ヘディング指令（操舵）[deg]。無ければ 0（直進）扱い
   achievedDeg?: number; // 達成方位（実測）[deg]
-  fell: boolean;
+  reached?: boolean; // 部屋ナビ: ゴール壁に到達したか
+  goalDistM?: number; // 部屋ナビ: 終端の目標壁までの距離 [m]
+  fell?: boolean;
 }
 /** public/policies/<file>.replay.json（meta + 記録リプレイ）。 */
 interface PolicyReplayFile {
@@ -265,13 +267,16 @@ async function loadPolicyReplay(entry: PolicyManifestEntry): Promise<PolicyRepla
   return record;
 }
 
-/** ライブ駆動に使えるコース汎用方策（単一重み）の manifest エントリ。無ければ null。 */
-function generalPolicyEntry(): PolicyManifestEntry | null {
-  return (
-    policyManifest.find(
-      (e) => e.mechanism === mechId && e.motor === motorId && e.policy === 'general',
-    ) ?? null
+/**
+ * ブラウザ内でリアルタイム駆動できる単一重み方策の重み stem。無ければ null。
+ * 部屋ナビは room 専用方策、それ以外はコース汎用方策。manifest に該当 policy のエントリがある時だけ返す。
+ */
+function livePolicyStem(): string | null {
+  const policyTag = effectiveCourse() === 'room' ? 'room' : 'general';
+  const ok = policyManifest.some(
+    (e) => e.mechanism === mechId && e.motor === motorId && e.policy === policyTag,
   );
+  return ok ? `snake3d-${policyTag}-${motorId}` : null;
 }
 
 /** ライブ方策の重み JSON を取得（fetch はキャッシュ）。決定論フォワードに渡す。 */
@@ -285,20 +290,25 @@ async function loadPolicyWeights(stem: string): Promise<PolicyWeightsFile> {
   return file;
 }
 
-/** 目標方位スライダーをモードに合わせて構成（RL=録画方位に量子化 / ライブ=連続）。 */
+/** 目標方位スライダーをモード×コースに合わせて構成（RL=録画方位に量子化 / ライブ=連続）。 */
 function syncHeadingSlider(): void {
+  // 部屋ナビは ±90°（曲がれる範囲）。+x コースは ±25/30°。
+  const room = effectiveCourse() === 'room';
   if (motionMode === 'live') {
-    // ライブは連続操舵（±30°・1° 刻み）。スライダーを動かすと即座に方位指令が変わる。
-    headingInput.min = '-30';
-    headingInput.max = '30';
-    headingInput.step = '1';
-    commandHeadingDeg = Math.max(-30, Math.min(30, Math.round(commandHeadingDeg)));
+    // ライブは連続操舵。スライダーを動かすと即座に方位指令が変わる。
+    const max = room ? 90 : 30;
+    headingInput.min = String(-max);
+    headingInput.max = String(max);
+    headingInput.step = room ? '5' : '1';
+    commandHeadingDeg = Math.max(-max, Math.min(max, Math.round(commandHeadingDeg)));
   } else {
-    // RL は録画済みの離散方位（±25°・5° 刻み）の最近傍を再生する。
-    headingInput.min = '-25';
-    headingInput.max = '25';
-    headingInput.step = '5';
-    commandHeadingDeg = Math.max(-25, Math.min(25, Math.round(commandHeadingDeg / 5) * 5));
+    // RL は録画済みの離散方位の最近傍を再生する（部屋=±90/45°、+x=±25/5°）。
+    const max = room ? 90 : 25;
+    const step = room ? 45 : 5;
+    headingInput.min = String(-max);
+    headingInput.max = String(max);
+    headingInput.step = String(step);
+    commandHeadingDeg = Math.max(-max, Math.min(max, Math.round(commandHeadingDeg / step) * step));
   }
   headingInput.value = String(commandHeadingDeg);
   headingValue.textContent = `${commandHeadingDeg > 0 ? '+' : ''}${commandHeadingDeg}°`;
@@ -307,7 +317,7 @@ function syncHeadingSlider(): void {
 /** scripted/RL/ライブ ボタンの有効/無効と選択状態を同期する（成果物が無いモードは scripted に戻す）。 */
 function updateModeAvailability(): void {
   const hasPolicy = findPolicyEntries().length > 0; // 選択コースの録画リプレイ（RL 再生）
-  const hasLive = generalPolicyEntry() !== null; // コース汎用の重み（ライブ駆動）
+  const hasLive = livePolicyStem() !== null; // ブラウザ内ライブ駆動できる単一重み方策
   btnRL.disabled = !hasPolicy;
   btnLive.disabled = !hasLive;
   if (motionMode === 'rl' && !hasPolicy) motionMode = 'scripted';
@@ -435,15 +445,19 @@ async function runRL(): Promise<void> {
     entry.achievedDeg !== undefined
       ? ` → 実方位 ${entry.achievedDeg > 0 ? '+' : ''}${entry.achievedDeg.toFixed(0)}°`
       : '';
-  const rlCm = entry.forwardM * 100;
-  if (entry.baseForwardM !== undefined && entry.baseForwardM > 0) {
+  if (entry.reached !== undefined) {
+    // 部屋ナビ: 到達と残距離を表示。
+    const dist = (entry.goalDistM ?? 0) * 100;
+    tunedInfo.textContent = `RL方策 ${cmdStr}${achStr}・${entry.reached ? 'ゴール到達✓' : `未到達（残${dist.toFixed(0)}cm）`}`;
+  } else if (entry.baseForwardM !== undefined && entry.baseForwardM > 0) {
+    const rlCm = (entry.forwardM ?? 0) * 100;
     const baseCm = entry.baseForwardM * 100;
     const pct = ((rlCm - baseCm) / baseCm) * 100;
     tunedInfo.textContent =
       `RL方策 ${cmdStr}${achStr}・基盤 ${baseCm.toFixed(0)}cm → RL ${rlCm.toFixed(0)}cm ` +
       `(${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%)${entry.fell ? '（破綻）' : ''}`;
   } else {
-    tunedInfo.textContent = `RL方策 ${cmdStr}${achStr}・前進 ${rlCm.toFixed(0)}cm${entry.fell ? '（破綻）' : ''}`;
+    tunedInfo.textContent = `RL方策 ${cmdStr}${achStr}・前進 ${((entry.forwardM ?? 0) * 100).toFixed(0)}cm${entry.fell ? '（破綻）' : ''}`;
   }
   buildParamSliders();
   const rl = recordedSnake3DReplay(
@@ -487,8 +501,8 @@ function liveStatsRows(): StatRow[] {
 
 /** 選択コース×汎用方策でライブ駆動を開始（重みを純JSフォワードへロードし env を用意）。 */
 async function startLive(): Promise<void> {
-  const entry = generalPolicyEntry();
-  if (!entry) {
+  const stem = livePolicyStem();
+  if (!stem) {
     motionMode = 'scripted';
     updateModeAvailability();
     await run();
@@ -498,7 +512,6 @@ async function startLive(): Promise<void> {
   renderStats([{ label: '状態', value: 'ライブ方策を初期化中…' }]);
   torqueCapNm = getServo(motorId).stallNm;
   syncTorqueUI();
-  const stem = `snake3d-general-${motorId}`;
   let weights: PolicyWeightsFile;
   try {
     weights = await loadPolicyWeights(stem);
@@ -515,11 +528,12 @@ async function startLive(): Promise<void> {
 
   // 学習時と同じモーター設定（stiffness/damping は固定、cap はサーボの stall）で env を作る。
   const servo = getServo(motorId);
+  const room = effectiveCourse() === 'room';
   const terrain = COURSES[effectiveCourse() as CourseId]();
-  const cfg = defaultSnakeEnvConfig({
-    terrain,
-    motor: { stiffness: 3, damping: 0.15, maxTorqueNm: servo.stallNm },
-  });
+  const motor = { stiffness: 3, damping: 0.15, maxTorqueNm: servo.stallNm };
+  const cfg = room
+    ? roomSnakeEnvConfig({ terrain, motor })
+    : defaultSnakeEnvConfig({ terrain, motor });
   cfg.episodeSteps = 1800; // 終端まで走り、到達したら自動 reset でループ
   const env = await SnakeEnv.create(cfg);
   if (seq !== loadSeq) {
@@ -532,14 +546,17 @@ async function startLive(): Promise<void> {
   liveForward = makePolicyForward(weights.weights, weights.obsDim, weights.actDim);
   resetLiveEpisode();
 
-  // ビューを組む（再生 replay は使わないので null 化）。グリッドは進行範囲を広めに固定で張る。
+  // ビューを組む（再生 replay は使わないので null 化）。グリッドは進行範囲を固定で張る（部屋は部屋枠）。
   replay = null;
   view.showSnake3D();
   view.buildSnake3D(env.getLayout());
   view.setSnake3DTerrain(terrain);
-  view.setSnake3DLiveGrid([-1, 13], [-2, 2]);
+  if (room) view.setSnake3DLiveGrid([ROOM.backX, ROOM.frontX], [-ROOM.halfY, ROOM.halfY]);
+  else view.setSnake3DLiveGrid([-1, 13], [-2, 2]);
   setPlaying(true);
-  tunedInfo.textContent = 'ライブ: 汎用方策をブラウザ内でリアルタイム駆動。スライダーで即操舵。';
+  tunedInfo.textContent = room
+    ? 'ライブ: 部屋ナビ方策をブラウザ内で駆動。スライダーで目標方位へ即操舵（±90°）。'
+    : 'ライブ: 汎用方策をブラウザ内でリアルタイム駆動。スライダーで即操舵。';
   buildParamSliders();
   renderStats(liveStatsRows());
 }
