@@ -8,11 +8,11 @@
     "motorName": "MG996R (6V)",
     "mass": 0.6,
     "base": "climb-gait",
-    "policy": "general",
-    "forwardM": 8.7918,
+    "policy": "challenge",
+    "forwardM": 7.9717,
     "baseForwardM": 5.5541,
-    "achievedDeg": 15.4769,
-    "crossM": 2.4344,
+    "achievedDeg": -13.451,
+    "crossM": 1.9066,
     "fell": false
   },
   {
@@ -24,11 +24,11 @@
     "motorName": "MG996R (6V)",
     "mass": 0.6,
     "base": "climb-gait",
-    "policy": "general",
-    "forwardM": 8.2145,
+    "policy": "challenge",
+    "forwardM": 8.0911,
     "baseForwardM": 6.9233,
-    "achievedDeg": -2.1919,
-    "crossM": 3.4544,
+    "achievedDeg": -24.6897,
+    "crossM": 0.0438,
     "fell": false
   },
   {
@@ -40,11 +40,11 @@
     "motorName": "MG996R (6V)",
     "mass": 0.6,
     "base": "climb-gait",
-    "policy": "general",
-    "forwardM": 8.8188,
+    "policy": "challenge",
+    "forwardM": 8.0245,
     "baseForwardM": 3.1441,
-    "achievedDeg": 22.5405,
-    "crossM": 0.3788,
+    "achievedDeg": 13.2289,
+    "crossM": 1.6722,
     "fell": false
   },
   {
