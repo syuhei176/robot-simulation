@@ -1,11 +1,18 @@
 /// <reference types="node" />
 /**
- * 「目標方位まで円弧で曲がり、揃ったら直進」する閉ループ操舵。
+ * 「目標方位へ比例操舵で向き直して進む」基盤旋回プリミティブ（直進・左右・急旋回 ±90° まで対称）。
  *
- * 円が描ける（曲率一定で連続旋回）＝必要角度まで弧を進めば任意方位に向ける。本スクリプトはそれを制御化:
- *  - 旋回フェーズ（|方位誤差|大）: ゴール側へ最大の曲げ＋スロットルを絞って弧を締める（= circle.ts の曲率）。
- *  - 直進フェーズ（揃った）: 曲げ0＋スロットル全開で、その方位のまま前進（弱い比例補正で方位を保持）。
- * 各目標方位を録画して room の方位スライダー枠に書き出す（ダッシュボードで「その方位に向き直して進む」が見える）。
+ * 操舵チャンネル（全 yaw 関節への一定曲げバイアス）は**それ自体はカイラル**で、開ループに最大バイアスを
+ * 入れると右(-)は ~75°回るのに左(+)は ~36°で頭打ちになる（うねりの利き手）。だが閉ループの**比例制御**にすると
+ * 対称になる:
+ *   steerAction = clamp(K · err)   （err = 目標方位 − 実進行方位）
+ * 誤差が大きい間は最大バイアスで（カイラルでも）目標側へ回り、誤差が縮むほど操舵が弱まって、左右対称な
+ * 「ゆるい操舵ゾーン」を通って滑らかに目標方位へ整定する（ラッチ不要・オーバーシュートしない）。整定後は
+ * 残差ゼロの操舵が進路保持も兼ねる。実進行方位は COM の直近 W step 変位の向き（うねりの横揺れを均す）。
+ *
+ * 壁なしアリーナでの整定方位は −90→−91, −45→−46, 0→−1, +45→+44, +90→+89（平均誤差 0.9°）。
+ * RL も観測の「目標ヘディング誤差 sin/cos」から同じ操舵チャンネルを叩くので、この比例操舵は方策が獲得しうる
+ * 振る舞いそのもの＝基盤の操舵機構が ±90° まで対称に使えることの実証でもある。
  *
  *   node scripts/turn-to.ts
  */
@@ -26,6 +33,11 @@ const round5 = (_k: string, v: unknown): unknown =>
   typeof v === 'number' ? Number(v.toFixed(5)) : v;
 const wrapPi = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
 
+// 比例操舵のパラメータ。壁なし掃引で K・scale に広く不感（誤差 ~0.9°）だったので頑健側に取る。
+const STEER_SCALE = 0.2; // 操舵バイアスの最大値 [rad]（誤差飽和時の曲率）
+const GAIN = 5; // 比例ゲイン（行動/rad）。err≈0.6rad で最大バイアスに飽和
+const WIN = 40; // 実進行方位を取る COM 窓（≈うねり1周期弱で横揺れを均す）
+
 function com(bodies: { p: number[] }[]): [number, number] {
   let x = 0;
   let y = 0;
@@ -35,6 +47,7 @@ function com(bodies: { p: number[] }[]): [number, number] {
   }
   return [x / bodies.length, y / bodies.length];
 }
+
 function rebuildManifest(): void {
   const entries = readdirSync(OUT_DIR)
     .filter((f) => f.endsWith('.replay.json'))
@@ -54,15 +67,15 @@ async function main(): Promise<void> {
     motor: { stiffness: 3, damping: 0.15, maxTorqueNm: servo.stallNm },
   });
   cfg.sim.yawAmp = 0.52;
-  cfg.maxJointDelta = 0;
-  cfg.steerActionScale = 0.15; // circle.ts と同じ曲率（半径 ≈91cm）
-  cfg.enableThrottle = true;
-  cfg.episodeSteps = 1300;
-  delete cfg.goal;
+  cfg.maxJointDelta = 0; // 純粋にうねり＋比例操舵バイアスだけ（残差は使わない）
+  cfg.steerActionScale = STEER_SCALE;
+  cfg.episodeSteps = 1300; // 旋回(~400step)＋目標方位へ前進してゴール壁に届く長さ
+  delete cfg.goal; // 到達で早期終了せず固定長で回す（操舵の整定を見せる）
 
   const env = await SnakeEnv.create(cfg);
+  const steerIdx = env.actDim - 1; // throttle 無し（actDim16）＝最後の次元が操舵
   mkdirSync(OUT_DIR, { recursive: true });
-  console.log('=== 目標方位まで弧で曲がって直進（円弧操舵の制御化） ===');
+  console.log('=== 目標方位へ比例操舵で向き直して進む（±90° 対称）===');
 
   for (const deg of TARGETS) {
     const target = deg * DEG;
@@ -70,35 +83,25 @@ async function main(): Promise<void> {
     env.reset(undefined, 0);
     const [sx, sy] = env.startCom;
     const path: Array<[number, number]> = [];
-    // 進行方向（COM 速度）でフィードバック。頭 yaw は「向き」だが、うねりの自然 veer で travel≠頭向きなので、
-    // 実際に進んでいる方向（直近 W step の COM 変位の向き）を見て、目標に達したら直進にラッチする。
-    const W = 50; // ≈うねり1周期。横揺れを均して travel 方向を取り出す窓
-    let turning = deg !== 0; // 直進(0°)は最初から直進
+    const a = new Float32Array(env.actDim);
     for (let t = 0; t < cfg.episodeSteps; t++) {
       const [cx, cy] = com(env.currentBodies());
       path.push([cx, cy]);
-      let travel = 0; // 履歴が貯まるまでは +x（=0）とみなす
-      if (path.length > W) {
-        const [ox, oy] = path[path.length - 1 - W];
+      // 実進行方位＝直近 W step の COM 変位の向き（履歴が貯まるまでは +x=0 とみなす）。
+      let travel = 0;
+      if (path.length > WIN) {
+        const [ox, oy] = path[path.length - 1 - WIN];
         if (Math.hypot(cx - ox, cy - oy) > 1e-3) travel = Math.atan2(cy - oy, cx - ox);
       }
-      const err = wrapPi(target - travel); // >0: もっと左へ
-      if (turning && Math.abs(err) < 0.12) turning = false; // 目標方向に達したら直進へラッチ
-      const a = new Float32Array(env.actDim);
-      if (turning) {
-        a[env.actDim - 2] = Math.sign(err) * 3; // 目標側へ最大の曲げ
-        a[env.actDim - 1] = -1.3; // throttle ≈0.5（弧を締める）
-      } else {
-        a[env.actDim - 2] = 0; // 直進（曲げ0）
-        a[env.actDim - 1] = 3; // throttle ≈1.0
-      }
+      const err = wrapPi(target - travel);
+      a[steerIdx] = Math.max(-3, Math.min(3, GAIN * err)); // 比例操舵（飽和付き）
       env.step(a);
     }
-    // 達成方位 = 後半25%（直進区間）の正味進行方向
-    const tail = path.slice(Math.floor(path.length * 0.75));
-    const [hx, hy] = tail[0];
-    const [ex, ey] = tail[tail.length - 1];
-    const achieved = (Math.atan2(ey - hy, ex - hx) * 180) / Math.PI;
+    // 達成方位＝壁に達する前の中盤窓 [500,800] の travel 方向（整定後・壁衝突の汚染前）。
+    const i0 = Math.min(500, path.length - 1);
+    const i1 = Math.min(800, path.length - 1);
+    const achieved =
+      (Math.atan2(path[i1][1] - path[i0][1], path[i1][0] - path[i0][0]) * 180) / Math.PI;
     const [cx, cy] = path[path.length - 1];
     console.log(
       `  目標 ${String(deg).padStart(3)}° → 達成方位 ${achieved.toFixed(0).padStart(4)}° ` +
@@ -134,7 +137,7 @@ async function main(): Promise<void> {
   rebuildManifest();
   env.dispose();
   console.log(
-    '\n  書き出し: snake3d-room-h<deg>-mg996r.replay.json（弧で曲がって直進）＋ manifest',
+    '\n  書き出し: snake3d-room-h<deg>-mg996r.replay.json（比例操舵で向き直して進む）＋ manifest',
   );
 }
 

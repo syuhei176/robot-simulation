@@ -155,7 +155,7 @@
     "policy": "room",
     "reached": false,
     "goalDistM": 0,
-    "achievedDeg": -4.7949
+    "achievedDeg": -0.11
   },
   {
     "file": "snake3d-room-hm45-mg996r.replay.json",
@@ -169,7 +169,7 @@
     "policy": "room",
     "reached": false,
     "goalDistM": 0,
-    "achievedDeg": -33.8988
+    "achievedDeg": -45.2338
   },
   {
     "file": "snake3d-room-hm90-mg996r.replay.json",
@@ -183,7 +183,7 @@
     "policy": "room",
     "reached": false,
     "goalDistM": 0,
-    "achievedDeg": -74.7602
+    "achievedDeg": -89.6383
   },
   {
     "file": "snake3d-room-hp45-mg996r.replay.json",
@@ -197,7 +197,7 @@
     "policy": "room",
     "reached": false,
     "goalDistM": 0,
-    "achievedDeg": 41.3466
+    "achievedDeg": 44.9163
   },
   {
     "file": "snake3d-room-hp90-mg996r.replay.json",
@@ -211,6 +211,6 @@
     "policy": "room",
     "reached": false,
     "goalDistM": 0,
-    "achievedDeg": 35.5575
+    "achievedDeg": 89.0141
   }
 ]
