@@ -21,6 +21,8 @@ export class StairDynamicsView {
   private readonly snake3dDecor = new THREE.Group(); // trail / 目盛り / 開始マーカー（group 配下＝z-up）
   private readonly snake3dTerrain = new THREE.Group(); // コースの地形箱（group 配下＝z-up）
   private snake3dHeadDot: THREE.Mesh | null = null;
+  private ground: THREE.Mesh | null = null; // コンテンツ（地形）の範囲に合わせて張り直す床
+  private groundGrid: THREE.GridHelper | null = null;
   private readonly followTarget = new THREE.Vector3();
   private readonly desiredCamera = new THREE.Vector3();
 
@@ -33,9 +35,10 @@ export class StairDynamicsView {
     container.appendChild(this.renderer.domElement);
 
     this.scene.background = new THREE.Color(0x070806);
-    this.scene.fog = new THREE.Fog(0x070806, 1.8, 3.8);
+    // フォグは奥行き感のため残すが、6×6 部屋や長い +x コースが奥までフェードで消えないよう遠めに。
+    this.scene.fog = new THREE.Fog(0x070806, 2.5, 11);
 
-    this.camera = new THREE.PerspectiveCamera(45, 1, 0.01, 10);
+    this.camera = new THREE.PerspectiveCamera(45, 1, 0.01, 24);
     this.camera.position.set(0.1, 0.5, 0.9);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -134,6 +137,23 @@ export class StairDynamicsView {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       this.snake3dTerrain.add(mesh);
+    }
+
+    // 床を地形の範囲に合わせて張り直す（部屋なら部屋枠、+x コースなら回廊）。地形なし（平地）は前方回廊の既定。
+    if (boxes.length > 0) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (const b of boxes) {
+        minX = Math.min(minX, b.cx - b.halfX);
+        maxX = Math.max(maxX, b.cx + b.halfX);
+        minY = Math.min(minY, b.cy - b.halfY);
+        maxY = Math.max(maxY, b.cy + b.halfY);
+      }
+      this.rebuildGround(Math.min(minX, -0.3), maxX, minY, maxY); // 蛇の開始(x≈0)も含める
+    } else {
+      this.rebuildGround(-0.6, 9.5, -2, 2);
     }
   }
 
@@ -303,19 +323,53 @@ export class StairDynamicsView {
     fill.position.set(0.8, 0.4, -0.8);
     this.scene.add(fill);
 
+    // 床は setSnake3DTerrain でコンテンツ範囲に張り直す。ここでは既定（+x 回廊）を置く。
+    this.rebuildGround(-0.6, 9.5, -2, 2);
+  }
+
+  /**
+   * 床（地面プレーン＋参照グリッド）を sim 座標の範囲 [minX,maxX]×[minY,maxY] に合わせて張り直す。
+   * 部屋ナビなら部屋枠、+x コースなら回廊を覆う。setSnake3DTerrain から地形の bbox で呼ぶ。
+   */
+  private rebuildGround(minX: number, maxX: number, minY: number, maxY: number): void {
+    if (this.ground) {
+      this.scene.remove(this.ground);
+      this.ground.geometry.dispose();
+      (this.ground.material as THREE.Material).dispose();
+    }
+    if (this.groundGrid) {
+      this.scene.remove(this.groundGrid);
+      this.groundGrid.geometry.dispose();
+      (this.groundGrid.material as THREE.Material).dispose();
+    }
+    const pad = 0.4;
+    const w = maxX - minX + 2 * pad;
+    const h = maxY - minY + 2 * pad;
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(2.4, 1.2),
+      new THREE.PlaneGeometry(w, h),
       new THREE.MeshStandardMaterial({ color: 0x171916, roughness: 0.95 }),
     );
     ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -0.001;
+    ground.position.set(cx, -0.001, -cy); // sim(x,y)→three(x,-y)
     ground.receiveShadow = true;
     this.scene.add(ground);
+    this.ground = ground;
 
-    const grid = new THREE.GridHelper(2.4, 24, 0x69705f, 0x2d3328);
+    // 参照グリッド（正方）。床全体を覆うよう長辺に合わせ、中心へ置く。
+    const span = Math.max(w, h);
+    const grid = new THREE.GridHelper(
+      span,
+      Math.max(4, Math.round(span / 0.25)),
+      0x69705f,
+      0x2d3328,
+    );
     (grid.material as THREE.Material).transparent = true;
-    (grid.material as THREE.Material).opacity = 0.32;
+    (grid.material as THREE.Material).opacity = 0.22;
+    grid.position.set(cx, 0, -cy);
     this.scene.add(grid);
+    this.groundGrid = grid;
   }
 
   private resize(): void {
