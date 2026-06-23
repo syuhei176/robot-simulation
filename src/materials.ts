@@ -10,13 +10,17 @@ import {
   buildBom,
   bomComparison,
   pickSnakeServos,
+  purchaseLinks,
   servoComparison,
+  servoSearchQuery,
+  vendorLinks,
   LIFT_LINK_COUNT,
   REQUIRED_TORQUE_NM,
   SNAKE_JOINT_COUNT,
   SNAKE_LINK_COUNT,
   SNAKE_TOTAL_MASS_KG,
   type ServoPick,
+  type VendorLink,
 } from './sim3d/bom.ts';
 
 function el<T extends HTMLElement>(id: string): T {
@@ -70,6 +74,22 @@ function badge(role: keyof ServoPick): HTMLSpanElement {
   const span = document.createElement('span');
   span.className = `badge ${role}`;
   span.textContent = ROLE_LABEL[role];
+  return span;
+}
+
+/** 購入リンク（ベンダー検索）を " / " 区切りで並べた span を作る。新規タブで開く。 */
+function linksSpan(links: VendorLink[]): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.className = 'buy';
+  links.forEach((link, i) => {
+    if (i > 0) span.append(document.createTextNode(' / '));
+    const a = document.createElement('a');
+    a.href = link.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = link.label;
+    span.append(a);
+  });
   return span;
 }
 
@@ -150,6 +170,7 @@ function renderBom(selectedId: string): void {
       { text: yen(line.unitJpy), cls: 'num' },
       { text: yen(line.subtotalJpy), cls: 'num' },
       { text: line.note, cls: 'note' },
+      { text: '', cls: 'buy-cell', html: linksSpan(purchaseLinks(line)) },
     ],
   }));
   rows.push({
@@ -160,6 +181,7 @@ function renderBom(selectedId: string): void {
       { text: '', cls: 'num' },
       { text: yen(bom.totalJpy), cls: 'num' },
       { text: '', cls: 'note' },
+      { text: '' },
     ],
   });
   const t = table(
@@ -169,6 +191,7 @@ function renderBom(selectedId: string): void {
       { text: '単価', cls: 'num' },
       { text: '小計', cls: 'num' },
       { text: '備考' },
+      { text: '購入' },
     ],
     rows,
   );
@@ -191,6 +214,11 @@ function renderServoCompare(selectedId: string): void {
         { text: yesNo(r.servo.feedback), cls: r.servo.feedback ? 'ok' : 'note' },
         { text: yen(r.servo.priceJpy), cls: 'num' },
         { text: yen(r.servoSubtotalJpy), cls: 'num' },
+        {
+          text: '',
+          cls: 'buy-cell',
+          html: linksSpan(vendorLinks(servoSearchQuery(r.servo), ['amazon', 'aliexpress'])),
+        },
       ],
     };
   });
@@ -203,6 +231,7 @@ function renderServoCompare(selectedId: string): void {
       { text: '位置帰還' },
       { text: '単価', cls: 'num' },
       { text: `小計(×${SNAKE_JOINT_COUNT})`, cls: 'num' },
+      { text: '購入' },
     ],
     rows,
   );
@@ -263,6 +292,7 @@ function renderNotes(): void {
     'サーボの価格・トルク・質量・位置帰還は servos.ts（単一の真実）、リンク/関節数・総質量は snake3d-dynamics.ts の DEFAULT_SNAKE3D_CONFIG から導出（重複定義なし）。',
     '制御部品はサーボの接続方式で変わる: シリアルバス（SCS/STS）は URT-1、PWM（SG90/MG90S/MG996R）は PCA9685。',
     '蛇以外の部品（マイコン・電源・フレーム・配線・ネジ類）の価格は 2026 年時点の国内通販の一般的な目安＝概算で、購入先・為替・数量で変動する。',
+    '「購入」リンクは特定商品ページではなく、型番・部品名での Amazon／AliExpress の検索結果を開く（リンク切れ・誤リンクを避けるため）。実際の価格・在庫はリンク先で確認のこと。Feetech 系サーボや URT-1 は AliExpress が安い場合が多い。',
   ];
   const ul = el('notes');
   ul.replaceChildren();

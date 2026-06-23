@@ -200,6 +200,11 @@ export interface Bom {
 
 const toLine = (part: BomPart): BomLine => ({ ...part, subtotalJpy: part.qty * part.unitJpy });
 
+/** 買い物リスト1行の購入リンク（query 未指定なら name、vendors 未指定なら Amazon のみ）。 */
+export function purchaseLinks(line: BomLine): VendorLink[] {
+  return vendorLinks(line.query ?? line.name, line.vendors ?? ['amazon']);
+}
+
 /** 選択サーボ（id）に対する買い物リスト全体を組み立てる。 */
 export function buildBom(servoId: string): Bom {
   const servo = getServo(servoId);
@@ -208,6 +213,8 @@ export function buildBom(servoId: string): Bom {
     qty: SNAKE_JOINT_COUNT,
     unitJpy: servo.priceJpy,
     note: `関節${SNAKE_JOINT_COUNT}個ぶん・${servo.feedback ? '位置帰還あり' : '位置帰還なし'}／${servo.iface}`,
+    query: servoSearchQuery(servo),
+    vendors: ['amazon', 'aliexpress'],
   };
   const lines = [servoPart, DRIVER_BY_IFACE[servo.iface], ...COMMON_PARTS].map(toLine);
   const totalJpy = lines.reduce((sum, l) => sum + l.subtotalJpy, 0);
