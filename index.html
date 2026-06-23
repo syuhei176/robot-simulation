@@ -140,11 +140,39 @@
         color: var(--bad);
       }
       .tuned-info {
+        font-size: 12px;
+        color: var(--text);
+        margin: 8px 0 4px;
+        min-height: 16px;
+        font-variant-numeric: tabular-nums;
+      }
+      .hint {
         font-size: 11px;
         color: var(--muted);
-        margin: 6px 0 4px;
-        min-height: 14px;
-        font-variant-numeric: tabular-nums;
+        margin: 2px 0 4px;
+        line-height: 1.45;
+      }
+      details#advanced {
+        margin-top: 14px;
+        border-top: 1px solid rgba(53, 200, 255, 0.18);
+        padding-top: 8px;
+      }
+      details#advanced > summary {
+        cursor: pointer;
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        text-transform: uppercase;
+        list-style: none;
+      }
+      details#advanced > summary::-webkit-details-marker {
+        display: none;
+      }
+      details#advanced > summary::before {
+        content: '▸ ';
+      }
+      details#advanced[open] > summary::before {
+        content: '▾ ';
       }
     </style>
   </head>
@@ -157,42 +185,37 @@
       <div class="sub" style="margin-top: -6px">
         <a id="link-materials" href="./materials.html">🛒 材料表（買い物リスト）→</a>
       </div>
+      <!-- ① 何を見るか: モーター × コース -->
+      <div class="section-title">① モーター ＆ コース</div>
       <div class="row">
         <!-- options populated from UI_MECHANISMS (snake-only) in dashboard.ts; hidden when single -->
         <select id="sel-mech"></select>
         <!-- options populated from SELECTABLE_SERVO_IDS in dashboard.ts -->
-        <select id="sel-motor"></select>
+        <select id="sel-motor" title="モーター（サーボ）"></select>
       </div>
       <div class="row">
         <!-- options populated from COURSE_OPTIONS in dashboard.ts -->
         <select id="sel-course" title="コース（地形）"></select>
       </div>
-      <div class="row">
-        <button id="btn-play" class="active">⏸ 一時停止</button>
-        <button id="btn-reset">先頭へ</button>
-      </div>
-      <label>再生位置 <span id="v-time">0.00s</span></label>
-      <input id="s-time" type="range" min="0" max="4" step="0.01" value="0" />
-      <label>再生速度 <span id="v-speed">1.00x</span></label>
-      <input id="s-speed" type="range" min="0.25" max="2" step="0.05" value="1" />
-      <label>モーター τ上限 <span id="v-torque-cap">2.94 N·m</span></label>
-      <input id="s-torque-cap" type="range" min="0.05" max="3.5" step="0.05" value="2.94" />
-      <div class="section-title">モーション（初期歩容を与える）</div>
-      <!-- sliders injected from mechanism.params in dashboard.ts -->
-      <div id="param-sliders"></div>
+
+      <!-- ② どう動かすか: モード ＋ 操舵 ＋ 結果 -->
       <div id="learned-gait">
-        <div class="section-title">歩容: 基盤(scripted) / RL録画 / ライブ操舵</div>
+        <div class="section-title">② 動かし方</div>
         <div class="row">
           <button id="btn-scripted" class="active" title="開ループの基盤登坂歩容（残差0）">
             基盤歩容
           </button>
-          <button id="btn-rl" disabled title="この コース×モーター の RL 方策はありません">
+          <button
+            id="btn-rl"
+            disabled
+            title="録画済み方策の再生（この コース×モーター に無ければ無効）"
+          >
             RL録画
           </button>
           <button
             id="btn-live"
             disabled
-            title="汎用方策をブラウザ内でリアルタイム駆動（スライダーで即操舵）"
+            title="方策をブラウザ内でリアルタイム駆動（スライダーで即操舵）"
           >
             ライブ
           </button>
@@ -203,9 +226,32 @@
           <input id="s-heading" type="range" min="-25" max="25" step="5" value="0" />
         </div>
         <div class="tuned-info" id="tuned-info"></div>
+        <div class="hint" id="mode-hint"></div>
       </div>
+
+      <!-- ③ 再生コントロール -->
+      <div class="section-title">③ 再生</div>
+      <div class="row">
+        <button id="btn-play" class="active">⏸ 一時停止</button>
+        <button id="btn-reset">先頭へ</button>
+      </div>
+      <label>再生位置 <span id="v-time">0.00s</span></label>
+      <input id="s-time" type="range" min="0" max="4" step="0.01" value="0" />
+      <label>再生速度 <span id="v-speed">1.00x</span></label>
+      <input id="s-speed" type="range" min="0.25" max="2" step="0.05" value="1" />
+
       <!-- rows injected from liveStats()/resultStats() in dashboard.ts -->
       <div class="stats" id="stats"></div>
+
+      <!-- 詳細（折りたたみ）: 普段は触らない歩容パラメータとトルク上限 -->
+      <details id="advanced">
+        <summary>詳細設定（歩容パラメータ・トルク上限）</summary>
+        <label>モーター τ上限 <span id="v-torque-cap">2.94 N·m</span></label>
+        <input id="s-torque-cap" type="range" min="0.05" max="3.5" step="0.05" value="2.94" />
+        <div class="section-title">モーション（初期歩容を与える）</div>
+        <!-- sliders injected from mechanism.params in dashboard.ts -->
+        <div id="param-sliders"></div>
+      </details>
     </div>
     <script type="module" src="/src/dashboard.ts"></script>
   </body>

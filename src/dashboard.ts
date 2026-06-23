@@ -50,6 +50,7 @@ const btnScripted = el<HTMLButtonElement>('btn-scripted');
 const btnRL = el<HTMLButtonElement>('btn-rl');
 const btnLive = el<HTMLButtonElement>('btn-live');
 const tunedInfo = el<HTMLDivElement>('tuned-info');
+const modeHint = el<HTMLDivElement>('mode-hint');
 const linkMaterials = el<HTMLAnchorElement>('link-materials');
 const courseRow = selCourse.parentElement as HTMLDivElement; // sel-course を含む .row
 const headingCtl = el<HTMLDivElement>('heading-ctl'); // 操舵スライダーの容れ物（RL/ライブ モードで表示）
@@ -330,7 +331,59 @@ function updateModeAvailability(): void {
   headingCtl.style.display = showHeading ? '' : 'none';
   // 再生位置スライダーはライブでは無効（録画ではないのでシークできない）。
   progress.disabled = motionMode === 'live';
+  // モードの説明（findability 改善）。録画/ライブが無い時は理由を出す。
+  if (motionMode === 'scripted') {
+    modeHint.textContent =
+      '基盤歩容＝開ループの登坂歩容（操舵なし）。録画方策を見るなら「RL録画」、その場で操舵するなら「ライブ」を選択。';
+  } else if (motionMode === 'rl') {
+    modeHint.textContent =
+      '録画済み方策を再生中。下の「目標方位」スライダーで方向を選ぶ（録画した方位の最近傍を再生）。';
+  } else {
+    modeHint.textContent =
+      '方策をブラウザ内でリアルタイム駆動中。「目標方位」スライダーを動かすと即座に操舵します。';
+  }
+  if (!hasPolicy && !hasLive) {
+    modeHint.textContent += ' ※この コース×モーター には録画方策がありません（基盤歩容のみ）。';
+  }
   syncHeadingSlider();
+  syncUrl();
+}
+
+/**
+ * 現在の状態（コース・モーター・モード・目標方位）を URL クエリへ反映（共有・ブックマーク・リロード安定）。
+ * 例: `?course=room&mode=rl&heading=-90` で教師の右旋回ビューに直行できる。既定値は省いて URL を短く保つ。
+ */
+function syncUrl(): void {
+  const p = new URLSearchParams();
+  p.set('course', courseId);
+  if (motorId !== 'mg996r') p.set('motor', motorId);
+  if (motionMode !== 'scripted') {
+    p.set('mode', motionMode);
+    if (commandHeadingDeg !== 0) p.set('heading', String(commandHeadingDeg));
+  }
+  history.replaceState(null, '', `${location.pathname}?${p.toString()}`);
+}
+
+/** 起動時に URL クエリから状態を復元する（reload 前に呼ぶ。mode の可否は updateModeAvailability が後で担保）。 */
+function applyUrlState(): void {
+  const p = new URLSearchParams(location.search);
+  const motor = p.get('motor');
+  if (motor && (SELECTABLE_SERVO_IDS as readonly string[]).includes(motor)) {
+    motorId = motor;
+    selMotor.value = motor;
+    torqueCapNm = getServo(motorId).stallNm;
+    syncTorqueUI();
+    syncMaterialsLink();
+  }
+  const course = p.get('course');
+  if (course && COURSE_OPTIONS.some((c) => c.id === course)) {
+    courseId = course as CourseId;
+    selCourse.value = course;
+  }
+  const mode = p.get('mode');
+  if (mode === 'rl' || mode === 'live') motionMode = mode;
+  const heading = p.get('heading');
+  if (heading !== null && Number.isFinite(Number(heading))) commandHeadingDeg = Number(heading);
 }
 
 function syncTorqueUI(): void {
@@ -666,6 +719,7 @@ headingInput.addEventListener('input', () => {
   headingValue.textContent = `${commandHeadingDeg > 0 ? '+' : ''}${commandHeadingDeg}°`;
   // ライブは次ステップで env.setCommandHeading が読むので即操舵（再構成不要）。
   if (motionMode === 'rl') void runRL(); // RL は最近傍の録画方位を再生（fetch はキャッシュ）
+  syncUrl();
 });
 torqueCapInput.addEventListener('input', () => {
   torqueCapNm = Number(torqueCapInput.value);
@@ -725,6 +779,7 @@ async function init(): Promise<void> {
   } catch {
     // policy manifest 不在（RL 未学習）は許容。RL ボタンは無効のまま。
   }
+  applyUrlState(); // URL クエリ（?course=&motor=&mode=&heading=）から初期状態を復元してから描画。
   await reload();
 }
 

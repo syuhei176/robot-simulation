@@ -151,11 +151,11 @@
     "motor": "mg996r",
     "motorName": "MG996R (6V)",
     "mass": 0.6,
-    "base": "climb-gait",
+    "base": "turn-to",
     "policy": "room",
-    "reached": true,
-    "goalDistM": 0.5983,
-    "achievedDeg": -15.9223
+    "reached": false,
+    "goalDistM": 0,
+    "achievedDeg": -4.7949
   },
   {
     "file": "snake3d-room-hm45-mg996r.replay.json",
@@ -165,11 +165,11 @@
     "motor": "mg996r",
     "motorName": "MG996R (6V)",
     "mass": 0.6,
-    "base": "climb-gait",
+    "base": "turn-to",
     "policy": "room",
-    "reached": true,
-    "goalDistM": 0.5982,
-    "achievedDeg": -36.8265
+    "reached": false,
+    "goalDistM": 0,
+    "achievedDeg": -33.8988
   },
   {
     "file": "snake3d-room-hm90-mg996r.replay.json",
@@ -179,11 +179,11 @@
     "motor": "mg996r",
     "motorName": "MG996R (6V)",
     "mass": 0.6,
-    "base": "climb-gait",
+    "base": "turn-to",
     "policy": "room",
-    "reached": true,
-    "goalDistM": 0.5978,
-    "achievedDeg": -38.1862
+    "reached": false,
+    "goalDistM": 0,
+    "achievedDeg": -74.7602
   },
   {
     "file": "snake3d-room-hp45-mg996r.replay.json",
@@ -193,11 +193,11 @@
     "motor": "mg996r",
     "motorName": "MG996R (6V)",
     "mass": 0.6,
-    "base": "climb-gait",
+    "base": "turn-to",
     "policy": "room",
-    "reached": true,
-    "goalDistM": 0.5957,
-    "achievedDeg": 23.9693
+    "reached": false,
+    "goalDistM": 0,
+    "achievedDeg": 41.3466
   },
   {
     "file": "snake3d-room-hp90-mg996r.replay.json",
@@ -207,10 +207,10 @@
     "motor": "mg996r",
     "motorName": "MG996R (6V)",
     "mass": 0.6,
-    "base": "climb-gait",
+    "base": "turn-to",
     "policy": "room",
-    "reached": true,
-    "goalDistM": 0.5984,
-    "achievedDeg": 26.2509
+    "reached": false,
+    "goalDistM": 0,
+    "achievedDeg": 35.5575
   }
 ]

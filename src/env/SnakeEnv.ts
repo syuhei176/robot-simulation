@@ -47,6 +47,10 @@ export interface SnakeEnvConfig {
   // 写像し、全 yaw 関節へ一律加算する。これで方策は「目標方位に応じて体をどれだけ曲げるか」を残差とは独立に学べる
   //（関節残差 ±maxJointDelta では操舵に必要な ~0.2rad を出すとうねりの余地が無くなるため、操舵は専用次元に分離）。
   steerActionScale: number;
+  // 急旋回プリミティブ（S18 きっかけ・既定 off）。true だと行動を1次元増やし（actDim+1）、最後の次元を「スロットル」
+  // ＝前進推進(yaw うねり振幅)のスケール ∈[0.1,1] に写像する。前進を絞る＋ゴール向き曲げで**ほぼその場旋回**ができ、
+  // θ=±90° の急旋回が可能になる（プローブ実証）。action≈0 で ≈全開＝基盤歩容。既定 off なので S17 方策(actDim16)は不変。
+  enableThrottle?: boolean;
   headingMaxRad: number; // 目標ヘディングのランダム化範囲 ±[rad]（操舵の学習。0 なら常に直進=+x）
   // reset で θ=0（まっすぐ）を選ぶ確率（残りは ±headingMaxRad 一様）。部屋ナビは 0.3。+x コースは 0。
   straightProb: number;
@@ -206,6 +210,9 @@ export class SnakeEnv implements RLEnv {
   // 操舵の yaw 定常バイアス [rad]。yaw 関節の土台ターゲットへ一律加算して体を一定曲率で曲げる。
   // 毎ステップ方策の操舵行動（最後の行動次元）から設定される＝曲がる動きを RL が獲得する（外部からは与えない）。
   private yawSteerBias = 0;
+  // スロットル（前進推進＝yaw うねりの振幅スケール）∈[0.1,1]。1=全開（基盤歩容）・小=その場旋回向け。
+  // enableThrottle 時のみ行動の追加次元から設定。前進を絞れることが急旋回（弧を締める）の鍵。
+  private throttle = 1;
   private yawEmaCos = 1; // 頭yaw を単位ベクトルで EMA（角度のラップ回避）
   private yawEmaSin = 0;
   private prevHeadQuat: Quat = [0, 0, 0, 1]; // ジャイロ（角速度）算出用の前ステップ頭姿勢
@@ -213,6 +220,7 @@ export class SnakeEnv implements RLEnv {
   // 部屋ナビ課題（cfg.goal 指定時）。reset で θ から目標壁を決め、step で接近を報酬化・到達で done。
   private readonly goalMode: boolean;
   private readonly privilegedObs: boolean;
+  private readonly throttleEnabled: boolean; // 行動にスロットル次元を足すか（急旋回プリミティブ・既定 off）
   private targetWall: RoomWall = 'front';
   private goalCx = 0; // ゴールパッチ中心（θ光線∩壁）。特権観測の方位算出に使う
   private goalCy = 0;
@@ -232,6 +240,7 @@ export class SnakeEnv implements RLEnv {
     this.cfg = cfg;
     this.goalMode = cfg.goal !== undefined;
     this.privilegedObs = cfg.privilegedObs === true && this.goalMode;
+    this.throttleEnabled = cfg.enableThrottle === true;
     this.sim = cfg.sim;
     this.n = this.sim.n;
     this.nJoints = this.n - 1;
@@ -257,8 +266,8 @@ export class SnakeEnv implements RLEnv {
     this.activeTerrain = this.terrains[0];
     this.data = new mj.MjData(this.model);
 
-    // 行動 = 各関節の歩容残差(nJoints) ＋ 操舵（yaw 曲率）1次元。最後の次元が目標方位に応じた曲げ量を担う。
-    this.actDim = this.nJoints + 1;
+    // 行動 = 各関節の歩容残差(nJoints) ＋ 操舵（yaw 曲率）1次元 ＋（enableThrottle 時）スロットル1次元。
+    this.actDim = this.nJoints + 1 + (this.throttleEnabled ? 1 : 0);
     // 観測（実機相当）: 関節角(nJoints)+関節速度(nJoints)+関節負荷(nJoints)
     //   +頭IMU姿勢[fwd xy, pitch, roll](4)+頭IMUジャイロ(3)+位相(2)+目標ヘディング誤差 sin/cos(2)。
     //   特権観測（教師用）なら末尾に [ゴール方位 sin/cos, 壁距離/6](3) を追加。
@@ -409,6 +418,7 @@ export class SnakeEnv implements RLEnv {
     this.stepCount = 0;
     this.residual.fill(0);
     this.yawSteerBias = 0;
+    this.throttle = 1; // action 未印加なら全開（基盤歩容）
     this.jointTau.fill(0);
 
     // 頭IMU 派生状態の初期化: yaw EMA を初期 yaw に、ジャイロ用の前姿勢を現姿勢に。
@@ -466,7 +476,8 @@ export class SnakeEnv implements RLEnv {
   /** 関節 j の土台ターゲット（残差を足す前のセルペノイド波）。runSnake3D の歩容と同式＋yaw 操舵バイアス。 */
   private baseTarget(j: number, ts: number): number {
     const isYaw = this.axes[j] === 'yaw';
-    const amp = isYaw ? this.sim.yawAmp : this.sim.pitchAmp;
+    // スロットルは前進推進＝yaw うねりの振幅だけを絞る（pitch は持ち上げなので絞らない）。1=基盤・小=その場旋回。
+    const amp = isYaw ? this.sim.yawAmp * this.throttle : this.sim.pitchAmp;
     const phase = isYaw ? 0 : this.sim.yawPitchPhase;
     const bias = isYaw ? this.yawSteerBias : 0; // yaw 関節へ一律オフセット＝方策の操舵行動が与える一定曲率
     return (
@@ -484,6 +495,10 @@ export class SnakeEnv implements RLEnv {
       this.residual[j] = this.cfg.maxJointDelta * tanh(action[j] ?? 0);
     }
     this.yawSteerBias = this.cfg.steerActionScale * tanh(action[this.nJoints] ?? 0);
+    // スロットル（enableThrottle 時）: a∈ℝ → ∈[0.1,1]。+1.5 バイアスで action≈0→≈全開＝基盤歩容を維持。
+    if (this.throttleEnabled) {
+      this.throttle = 0.1 + 0.9 * 0.5 * (1 + tanh((action[this.nJoints + 1] ?? 0) + 1.5));
+    }
 
     let stepDemand = 0;
     let stepApplied = 0;
