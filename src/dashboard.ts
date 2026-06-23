@@ -12,7 +12,6 @@ import { MECHANISMS, getMechanism } from './mech/registry.ts';
 import { recordedSnake3DReplay } from './mech/snake3d.ts';
 import { ROOM, type Snake3DReplay } from './sim3d/snake3d-dynamics.ts';
 import { SnakeEnv, defaultSnakeEnvConfig, roomSnakeEnvConfig } from './env/SnakeEnv.ts';
-import { makePolicyForward } from './rl/policyForward.ts';
 import {
   defaultParamValues,
   type MechParam,
@@ -80,14 +79,6 @@ interface PolicyReplayFile {
   meta: PolicyManifestEntry;
   replay: Snake3DReplay;
 }
-/** public/policies/<stem>.json（重み JSON・ライブ方策フォワード用）。 */
-interface PolicyWeightsFile {
-  obsDim: number;
-  actDim: number;
-  hidden: number;
-  weights: { policy: number[][]; value: number[][]; logStd: number[] };
-}
-
 // scripted=基盤歩容のライブ実行 / rl=録画リプレイ再生 / live=方策をブラウザ内でリアルタイム駆動。
 type MotionMode = 'scripted' | 'rl' | 'live';
 
@@ -114,14 +105,20 @@ let lastTimestamp: number | null = null;
 let policyManifest: PolicyManifestEntry[] = [];
 let motionMode: MotionMode = 'scripted';
 const policyCache = new Map<string, PolicyReplayFile>();
-const weightsCache = new Map<string, PolicyWeightsFile>();
 
 // ---- ライブ操舵（方策をブラウザ内でリアルタイムに 1 ステップずつ駆動）の状態 ----
 // 録画再生(replay)とは別経路。SnakeEnv をブラウザ内に1つ持ち、毎フレーム制御周期ぶん step して
 // 現在姿勢をビューへ流す。目標方位スライダーは env.setCommandHeading でライブに反映される。
 let liveEnv: SnakeEnv | null = null;
-let liveForward: ((obs: ArrayLike<number>) => Float32Array) | null = null;
-let liveObs: Float32Array = new Float32Array(0);
+// 比例操舵コントローラ（ライブ）: 目標方位と実進行方位の誤差に比例して操舵チャンネルを駆動する。
+// RL 方策の操舵はセンサーのみ＋固定方位学習で走行中の操作に鈍く ±26-44° 止まりだったため、ライブは
+// turn-to と同じ閉ループ比例制御（scale0.2）で駆動し、スライダーを動かすと即座に再操舵＝クリーンな ±90°。
+// 残差は 0（純粋なベース歩容＋操舵）。実進行方位は COM の直近 LIVE_WIN step 変位の向き（横揺れを均す）。
+const LIVE_STEER_SCALE = 0.2;
+const LIVE_GAIN = 5;
+const LIVE_WIN = 40;
+const wrapPi = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
+let liveComHist: Array<[number, number]> = [];
 let liveAccum = 0; // 実時間→制御ステップの蓄積（controlPeriod 毎に1ステップ進める）
 let liveStartProj = 0; // エピソード開始時の指令方向射影（前進量表示の基準）
 let liveStatsThrottle = 0;
@@ -268,29 +265,6 @@ async function loadPolicyReplay(entry: PolicyManifestEntry): Promise<PolicyRepla
   return record;
 }
 
-/**
- * ブラウザ内でリアルタイム駆動できる単一重み方策の重み stem。無ければ null。
- * 部屋ナビは room 専用方策、それ以外はコース汎用方策。manifest に該当 policy のエントリがある時だけ返す。
- */
-function livePolicyStem(): string | null {
-  const policyTag = isRoomCourse(effectiveCourse()) ? 'room' : 'general';
-  const ok = policyManifest.some(
-    (e) => e.mechanism === mechId && e.motor === motorId && e.policy === policyTag,
-  );
-  return ok ? `snake3d-${policyTag}-${motorId}` : null;
-}
-
-/** ライブ方策の重み JSON を取得（fetch はキャッシュ）。決定論フォワードに渡す。 */
-async function loadPolicyWeights(stem: string): Promise<PolicyWeightsFile> {
-  const cached = weightsCache.get(stem);
-  if (cached) return cached;
-  const res = await fetch(`./policies/${stem}.json`);
-  if (!res.ok) throw new Error(`方策の重みを取得できません: ${stem}`);
-  const file = (await res.json()) as PolicyWeightsFile;
-  weightsCache.set(stem, file);
-  return file;
-}
-
 /** 目標方位スライダーをモード×コースに合わせて構成（RL=録画方位に量子化 / ライブ=連続）。 */
 function syncHeadingSlider(): void {
   // 部屋ナビは ±90°（曲がれる範囲）。+x コースは ±25/30°。
@@ -318,7 +292,7 @@ function syncHeadingSlider(): void {
 /** scripted/RL/ライブ ボタンの有効/無効と選択状態を同期する（成果物が無いモードは scripted に戻す）。 */
 function updateModeAvailability(): void {
   const hasPolicy = findPolicyEntries().length > 0; // 選択コースの録画リプレイ（RL 再生）
-  const hasLive = livePolicyStem() !== null; // ブラウザ内ライブ駆動できる単一重み方策
+  const hasLive = isRoomCourse(effectiveCourse()); // 部屋なら比例操舵でライブ駆動できる（重み不要）
   btnRL.disabled = !hasPolicy;
   btnLive.disabled = !hasLive;
   if (motionMode === 'rl' && !hasPolicy) motionMode = 'scripted';
@@ -340,7 +314,7 @@ function updateModeAvailability(): void {
       '録画済み方策を再生中。下の「目標方位」スライダーで方向を選ぶ（録画した方位の最近傍を再生）。';
   } else {
     modeHint.textContent =
-      '方策をブラウザ内でリアルタイム駆動中。「目標方位」スライダーを動かすと即座に操舵します。';
+      'ベース歩容＋比例操舵でリアルタイム駆動中。「目標方位」スライダーを動かすと走行中でも即座に向き直します（±90°）。';
   }
   if (!hasPolicy && !hasLive) {
     modeHint.textContent += ' ※この コース×モーター には録画方策がありません（基盤歩容のみ）。';
@@ -528,15 +502,15 @@ function stopLive(): void {
     liveEnv.dispose();
     liveEnv = null;
   }
-  liveForward = null;
 }
 
-/** ライブのエピソードを初期化（現在の目標方位で reset し前進量の基準を取り直す）。 */
+/** ライブのエピソードを初期化（現在の目標方位で reset し前進量・操舵履歴の基準を取り直す）。 */
 function resetLiveEpisode(): void {
   if (!liveEnv) return;
-  liveObs = liveEnv.reset(undefined, commandHeadingDeg * DEG);
+  liveEnv.reset(undefined, commandHeadingDeg * DEG);
   liveAccum = 0;
   liveStartProj = liveEnv.progressMetric();
+  liveComHist = [];
 }
 
 /** ライブの統計行（モード・目標方位・指令方向への前進）。 */
@@ -552,32 +526,12 @@ function liveStatsRows(): StatRow[] {
   ];
 }
 
-/** 選択コース×汎用方策でライブ駆動を開始（重みを純JSフォワードへロードし env を用意）。 */
+/** 選択コース×ベース歩容＋比例操舵でライブ駆動を開始（重み不要・操舵は制御則）。 */
 async function startLive(): Promise<void> {
-  const stem = livePolicyStem();
-  if (!stem) {
-    motionMode = 'scripted';
-    updateModeAvailability();
-    await run();
-    return;
-  }
   const seq = ++loadSeq;
-  renderStats([{ label: '状態', value: 'ライブ方策を初期化中…' }]);
+  renderStats([{ label: '状態', value: 'ライブを初期化中…' }]);
   torqueCapNm = getServo(motorId).stallNm;
   syncTorqueUI();
-  let weights: PolicyWeightsFile;
-  try {
-    weights = await loadPolicyWeights(stem);
-  } catch (err) {
-    if (seq !== loadSeq) return;
-    motionMode = 'scripted';
-    updateModeAvailability();
-    tunedInfo.textContent = 'ライブ用の重みが見つからないため基盤歩容に戻しました';
-    console.error(err);
-    await run();
-    return;
-  }
-  if (seq !== loadSeq) return;
 
   // 学習時と同じモーター設定（stiffness/damping は固定、cap はサーボの stall）で env を作る。
   const servo = getServo(motorId);
@@ -587,6 +541,8 @@ async function startLive(): Promise<void> {
   const cfg = room
     ? roomSnakeEnvConfig({ terrain, motor })
     : defaultSnakeEnvConfig({ terrain, motor });
+  cfg.maxJointDelta = 0; // 残差なし＝純粋なベース歩容＋比例操舵
+  cfg.steerActionScale = LIVE_STEER_SCALE; // 0.2＝クリーンな±90を出す曲率（方策の0.06ではなく制御則用）
   // ライブは「自由走行」: 目標壁で終了させない（壁に着いても戻らず、スライダーで向き直して走り続けられる）。
   // done はブローアップ安全弁のみに（goal を外す＋実質無制限ステップ）。リセットは「先頭へ」で手動。
   delete cfg.goal;
@@ -599,7 +555,6 @@ async function startLive(): Promise<void> {
 
   stopLive(); // 直前のライブ env があれば破棄してから差し替え
   liveEnv = env;
-  liveForward = makePolicyForward(weights.weights, weights.obsDim, weights.actDim);
   resetLiveEpisode();
 
   // ビューを組む（再生 replay は使わないので null 化）。グリッドは進行範囲を固定で張る（部屋は部屋枠）。
@@ -610,27 +565,44 @@ async function startLive(): Promise<void> {
   if (room) view.setSnake3DLiveGrid([ROOM.backX, ROOM.frontX], [-ROOM.halfY, ROOM.halfY]);
   else view.setSnake3DLiveGrid([-1, 13], [-2, 2]);
   setPlaying(true);
-  tunedInfo.textContent = room
-    ? 'ライブ: 部屋ナビ方策をブラウザ内で駆動。スライダーで目標方位へ即操舵（±90°）。自由走行＝壁に着いても戻らず、向き直して継続（リセットは「先頭へ」）。'
-    : 'ライブ: 汎用方策をブラウザ内でリアルタイム駆動。スライダーで即操舵。';
+  tunedInfo.textContent =
+    'ライブ: ベース歩容＋比例操舵をブラウザ内で駆動。スライダーで走行中でも即座に向き直す（±90°）。自由走行＝壁に着いても戻らず継続（リセットは「先頭へ」）。';
   buildParamSliders();
   renderStats(liveStatsRows());
 }
 
-/** ライブの制御を1ステップ進める（目標方位を反映→方策の平均行動→env.step、終端で自動 reset）。 */
+/** ライブの制御を1ステップ進める（比例操舵で操舵チャンネルを駆動→env.step、終端で自動 reset）。 */
 function liveStepOnce(): void {
-  if (!liveEnv || !liveForward) return;
-  // スライダーは目標方位だけを与える。曲がる動き（yaw 曲率）は方策が操舵行動として出力する＝RL が獲得した操舵。
-  liveEnv.setCommandHeading(commandHeadingDeg * DEG);
-  const action = liveForward(liveObs);
-  const r = liveEnv.step(action);
-  liveObs = r.obs;
+  if (!liveEnv) return;
+  liveEnv.setCommandHeading(commandHeadingDeg * DEG); // 前進量表示（progressMetric）を現在の指令方向に合わせる
+  // 実進行方位＝COM の直近 LIVE_WIN step 変位の向き（うねりの横揺れを均す）。履歴が貯まるまでは +x(=0)。
+  const bodies = liveEnv.currentBodies();
+  let cx = 0;
+  let cy = 0;
+  for (const s of bodies) {
+    cx += s.p[0];
+    cy += s.p[1];
+  }
+  cx /= bodies.length;
+  cy /= bodies.length;
+  liveComHist.push([cx, cy]);
+  if (liveComHist.length > LIVE_WIN + 2) liveComHist.shift();
+  let travel = 0;
+  if (liveComHist.length > LIVE_WIN) {
+    const [ox, oy] = liveComHist[liveComHist.length - 1 - LIVE_WIN];
+    if (Math.hypot(cx - ox, cy - oy) > 1e-3) travel = Math.atan2(cy - oy, cx - ox);
+  }
+  // 比例操舵: 誤差が大きいほど最大バイアス、縮むほど弱まり目標方位へ滑らかに整定（走行中の操作にも即応）。
+  const err = wrapPi(commandHeadingDeg * DEG - travel);
+  const a = new Float32Array(liveEnv.actDim);
+  a[liveEnv.actDim - 1] = Math.max(-3, Math.min(3, LIVE_GAIN * err)); // 残差0、最後の次元=操舵
+  const r = liveEnv.step(a);
   if (r.done) resetLiveEpisode();
 }
 
 /** 実時間 dt ぶんだけライブ env を制御周期単位で進め、現在姿勢をビューへ適用する。 */
 function stepLive(dt: number): void {
-  if (!liveEnv || !liveForward) return;
+  if (!liveEnv) return;
   liveAccum += dt * speed;
   const period = liveEnv.controlPeriod;
   let n = 0;
@@ -759,7 +731,7 @@ function loop(timestamp: number): void {
   const dt = Math.min((timestamp - lastTimestamp) / 1000, 0.25);
   lastTimestamp = timestamp;
 
-  if (motionMode === 'live' && liveEnv && liveForward) {
+  if (motionMode === 'live' && liveEnv) {
     if (playing) stepLive(dt);
   } else if (replay && replay.duration > 0 && playing) {
     playbackTime = (playbackTime + dt * speed) % replay.duration;
